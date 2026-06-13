@@ -4,8 +4,11 @@
 mod rt;
 mod syscall;
 
-#[link(name = "c")]
-unsafe extern "C" {}
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    let code = main();
+    syscall::exit(code);
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
