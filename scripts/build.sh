@@ -72,10 +72,10 @@ patch_config() {
 run bin/fam0 fam0.seed src/fam0.fam0
 cmp ./bin/fam0 ./fam0.seed || { echo "fam0: binaries don't match!"; exit 1; }
 run bin/fam.uncompressed bin/fam0 src/fam.fam0
-#run bin/fampack bin/fam.uncompressed lib/stdlib.fam lib/asm.fam src/fampack.fam
-#pack bin/fam.uncompressed bin/fam
-#run bin/gen_hash bin/fam lib/stdlib.fam lib/asm.fam src/gen_hash.fam
-#run bin/tabernacle.uncompressed bin/fam0 src/tabernacle.fam0
+run bin/fampack bin/fam.uncompressed lib/stdlib.fam lib/asm.fam src/fampack.fam
+pack bin/fam.uncompressed bin/fam
+run bin/gen_hash bin/fam lib/stdlib.fam lib/asm.fam src/gen_hash.fam
+run bin/tabernacle.uncompressed bin/fam0 src/tabernacle.fam0
 #run bin/full_node.bin \
 #	bin/fam \
 #	lib/stdlib.fam \
