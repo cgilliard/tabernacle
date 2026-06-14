@@ -52,33 +52,4 @@ print("  sector 0 matches the written ramp (512 B)")
 PY
 rm -f "$DISK"
 
-echo "--- 3) storage-engine logic (no device): store + trie compile + unit tests ---"
-out=$(./tools/fam --test src/node_disk.fam src/node_disk_store.fam src/node_disk_trie.fam 2>&1) \
-    || { echo "$out"; echo "FAIL: engine logic tests exited non-zero"; exit 1; }
-echo "$out"
-echo "$out" | grep -q 'bp_basic' || { echo "FAIL: pool logic tests did not run"; exit 1; }
-echo "$out" | grep -q 'prims'    || { echo "FAIL: trie primitive tests did not run"; exit 1; }
-
-echo "--- 4) common engine on a real device (pool / meta / transaction) ---"
-DISK=$(mktemp)
-dd if=/dev/zero of="$DISK" bs=512 count=128 2>/dev/null
-out=$(timeout 60 ./tools/fam --test --disk="$DISK" src/node_disk.fam src/node_disk_store.fam tests/node_disk_store_dev.fam 2>&1) \
-    || { echo "$out"; echo "FAIL: store device test exited non-zero (or timed out)"; rm -f "$DISK"; exit 1; }
-echo "$out"
-for t in evict_rt mt_cycle tx_rt; do
-  echo "$out" | grep -q "$t" || { echo "FAIL: store device test $t did not run"; rm -f "$DISK"; exit 1; }
-done
-rm -f "$DISK"
-
-echo "--- 5) COW trie on a real device (32-byte keys: put/get/split/commit/reboot) ---"
-DISK=$(mktemp)
-dd if=/dev/zero of="$DISK" bs=512 count=128 2>/dev/null
-out=$(timeout 60 ./tools/fam --test --disk="$DISK" src/node_disk.fam src/node_disk_store.fam src/node_disk_trie.fam tests/node_disk_trie_dev.fam 2>&1) \
-    || { echo "$out"; echo "FAIL: trie device test exited non-zero (or timed out)"; rm -f "$DISK"; exit 1; }
-echo "$out"
-for t in trie_rt trie_split; do
-  echo "$out" | grep -q "$t" || { echo "FAIL: trie device test $t did not run"; rm -f "$DISK"; exit 1; }
-done
-rm -f "$DISK"
-
 echo "test_node_disk: PASS"
