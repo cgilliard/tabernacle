@@ -4,8 +4,8 @@
 # only build dependency is qemu-system-riscv32 to run the bootstrap chain.
 
 setup_qemu() {
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq qemu-system-misc >/dev/null
+    #sudo apt-get update -qq
+    #sudo apt-get install -y -qq qemu-system-misc >/dev/null
     qemu-system-riscv32 --version | head -1
 }
 
