@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -e
+exec </dev/null
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+build_fam
+
+echo "--- node_serve.fam logic tests (disk_step state machine, no device) ---"
+# node_serve depends on the device modules; compile the whole stack so its words
+# (and disk.fam + net.fam Test blocks) resolve.
+out=$(./tools/fam --test src/fence.fam src/disk.fam src/net.fam src/node_serve.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: node_serve tests exited non-zero"; exit 1; }
+echo "$out"
+echo "$out" | grep -q 'ds_machine' || { echo "FAIL: disk_step state-machine test did not run"; exit 1; }
+echo "$out" | grep -qE '[1-9][0-9]* passed' || { echo "FAIL: no tests ran (silent compile failure?)"; exit 1; }
+
+echo "test_node_serve: PASS"

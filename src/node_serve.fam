@@ -304,25 +304,64 @@ then
 then
 ;
 
-: serve
-begin
-  rx_poll dup if
-    drop                                 \ frame acquired; it lives at ns+0x34
-    \ Queue depth check: skip non-ARP packets when backlog > 8
-    dup 4 lit + @ 1002 lit + h@
-    over 20 lit + @ - FFFF lit and
-    8 lit > if
-      dup 34 lit + @ 17 lit + c@ 6 lit <> if
-        dup 5C lit + @ if 2E lit putc then
-      else
-        dup 5C lit + @ if
-          52 lit putc
-          dup 34 lit + @ 16 lit + c@ puthx2
-          dup 34 lit + @ 17 lit + c@ puthx2
-          20 lit putc
+\ ── dsk_step ( ns -- ns )  advance the background disk-save by ONE non-blocking
+\ step (a no-op when ns+0x6C is 0: disk-booted, or the save already finished).
+\ Folding this into the event loop is what lets the image-write OVERLAP serving:
+\ the old code drained the entire save before serving started.  Single request in
+\ flight (state machine over the multi-slot primitives): when no write is
+\ outstanding, submit the next sector (sector = ds.subd, which vwrite advances)
+\ until ds.nsec sectors are done, then issue one vflush and wait for it.
+\ Disk state ds (pointer in ns+0x6C):  +0x40 nsec  +0x44 phase(0 write/1 flush/2 done)
+\ +0x48 flush slot id.  (5-slot pipelining is possible but unneeded for a one-time
+\ background save; it would need per-slot free tracking against completion order.)
+: dsk_step
+dup 6C lit + @                       \ ( ns ds )   ds = ns.disk
+dup if
+  vpoll                              \ reap any completions ( ns ds )
+  dup 44 lit + @ 0 lit = if          \ phase WRITING
+    dup C lit + @ over 8 lit + @ = if          \ usd == subd  (no write outstanding)
+      dup 8 lit + @ over 40 lit + @ u< if      \ subd < nsec  (more to write)
+        dup 8 lit + @                                  \ sec = subd
+        2 lit pick 14 lit + @ over 9 lit lshift +      \ src = img_base + sec*512
+        vwrite drop                                    \ submit next sector ( ns ds )
+      else                                             \ all sectors written -> flush
+        vflush                                         \ ( ns ds fid )
+        dup FFFFFFFF lit <> if
+          over 48 lit + !                              \ ds.fid = flush slot
+          dup 44 lit + 1 lit swap !                    \ phase = FLUSHING
+        else                                           \ writethrough: nothing to flush
+          drop
+          dup 44 lit + 2 lit swap !                    \ phase = DONE
+          over 6C lit + 0 lit swap !                   \ ns.disk = 0 (inert hereafter)
+          "disk_save done\n" puts
         then
-        arp_hand
       then
+    then
+  else
+    dup 44 lit + @ 1 lit = if         \ phase FLUSHING
+      dup 48 lit + @ vstat if         \ flush completed?
+        dup 44 lit + 2 lit swap !     \ phase = DONE
+        over 6C lit + 0 lit swap !    \ ns.disk = 0
+        "disk_save done\n" puts
+      then
+    then
+  then
+  drop                               \ drop ds -> ( ns )
+else
+  drop                               \ no disk task -> ( ns )
+then
+;
+
+\ ── serve1 ( ns -- ns )  service AT MOST one received packet (one pass of the loop) ──
+: serve1
+rx_poll dup if
+  drop                                 \ frame acquired; it lives at ns+0x34
+  \ Queue depth check: skip non-ARP packets when backlog > 8
+  dup 4 lit + @ 1002 lit + h@
+  over 20 lit + @ - FFFF lit and
+  8 lit > if
+    dup 34 lit + @ 17 lit + c@ 6 lit <> if
+      dup 5C lit + @ if 2E lit putc then
     else
       dup 5C lit + @ if
         52 lit putc
@@ -331,14 +370,31 @@ begin
         20 lit putc
       then
       arp_hand
-      hnd_famc
     then
-    rx_done                              \ recycle the RX buffer + advance rx_last
   else
-    drop                                 \ no packet this pass
+    dup 5C lit + @ if
+      52 lit putc
+      dup 34 lit + @ 16 lit + c@ puthx2
+      dup 34 lit + @ 17 lit + c@ puthx2
+      20 lit putc
+    then
+    arp_hand
+    hnd_famc
   then
-0 lit
-until
+  rx_done                              \ recycle the RX buffer + advance rx_last
+else
+  drop                                 \ no packet this pass
+then
+;
+
+\ ── evloop ( ns -- )  the unified event loop: each pass advances the background disk
+\ save one step AND services one packet, so the two OVERLAP instead of running as two
+\ sequential phases (old: drain the whole save, then serve forever).
+: evloop
+begin
+  dsk_step
+  serve1
+0 lit until
 ;
 
 
@@ -361,40 +417,12 @@ swap dup if else drop E99 lit then over 68 lit + !   \ ns+0x68 eff_port (a2, 0 -
 0 lit over 20 lit + !          \ ns+0x20 rx_last
 0 lit over 54 lit + !          \ ns+0x54 last_sip
 0 lit over 58 lit + !          \ ns+0x58 last_seq
+0 lit over 6C lit + !          \ ns+0x6C ns.disk = 0 (no background save by default)
+\ ( bootsrc ns )
 
-\ Disk-save: if NET-booted (bootsrc == 1), write the image to disk so the next boot
-\ is a fast disk-boot instead of re-downloading.  ( bootsrc ns )
-swap 1 lit = if                \ ( ns )
-  "disk_write\n" puts
-  40 lit alloc                   \ disk state ds ( ns ds )
-  0 lit over 8 lit + !           \ ds.subd = 0
-  0 lit over C lit + !           \ ds.usd  = 0
-  0 lit over 10 lit + !          \ ds.next = 0
-  5000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !   \ ds.qb (page-aligned, zeroed)
-  find_blk over !                \ ds.dev = virtio-blk dev
-  vblkinit
-  \ STANDALONE drive loop: write sectors 0..nsec-1, one at a time, where the next
-  \ sector to write IS ds.subd (vwrite advances it) and nsec = roundup(img_size,512).
-  \ vwrite + vwait keeps a single request in flight; Stage 2 folds vpoll into the
-  \ serve loop (and can pipeline up to 5 slots) so the write overlaps with serving.
-  begin
-    dup 8 lit + @                              \ sec = subd            ( ns ds sec )
-    2 lit pick 18 lit + @ 1FF lit + 9 lit rshift  \ nsec                ( ns ds sec nsec )
-    u<                                         \ sec < nsec ?          ( ns ds flag )
-  while
-    dup 8 lit + @                              \ sec                   ( ns ds sec )
-    2 lit pick 14 lit + @ over 9 lit lshift +  \ src = img_base+sec*512 ( ns ds sec src )
-    vwrite                                     \ ( ns ds id )
-    vwait drop                                 \ drive to completion, drop id ( ns ds )
-  repeat
-  vflush                          \ vblkinit may have negotiated writeback -> force the
-  dup FFFFFFFF lit <> if vwait drop else drop then   \ image durable before next boot
-  drop                           \ ( ns )  drop ds
-  "disk_write done\n" puts
-then
-\ ( ns )
-
-\ Discover virtio-net, lay out queues + buffers, init device + RX ring.
+\ Bring up virtio-net FIRST, so the node can serve peers WHILE the disk-save (if any)
+\ runs concurrently in the same event loop.  Discover device, lay out queues +
+\ buffers, init device + RX ring.
 find_net over !
 AFFF lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ rx_q (page-aligned)
 dup 4 lit + @ 2000 lit + over 8 lit + !                    \ tx_q   = rx_q + 0x2000
@@ -405,6 +433,87 @@ dup @ 100 lit + over 60 lit + 6 lit mcopy                  \ our MAC <- device c
 rx_setup
 fence_io
 dup @ 50 lit + 0 lit swap !                                \ kick RX queue
+\ ( bootsrc ns )
+
+\ Disk-save: if NET-booted (bootsrc == 1), build the disk state and KICK OFF a
+\ background save -- do NOT drain it here.  evloop's dsk_step advances it one step
+\ per pass while serve1 services peers, so the image-write overlaps serving.  Next
+\ boot is then a fast disk-boot instead of re-downloading.  ( bootsrc ns )
+swap 1 lit = if                \ ( ns )
+  "disk_save start\n" puts
+  4C lit alloc                   \ disk state ds ( ns ds )
+  0 lit over 8 lit + !           \ ds.subd  = 0
+  0 lit over C lit + !           \ ds.usd   = 0
+  0 lit over 10 lit + !          \ ds.next  = 0
+  0 lit over 44 lit + !          \ ds.phase = 0 (WRITING)
+  5000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !   \ ds.qb (page-aligned, zeroed)
+  find_blk over !                \ ds.dev = virtio-blk dev
+  vblkinit
+  over 18 lit + @ 1FF lit + 9 lit rshift over 40 lit + !   \ ds.nsec = roundup(img_size,512)
+  over 6C lit + !                \ ns.disk = ds  (start the background save) ( ns )
+then
+\ ( ns )
+
 "serve\n" puts
-serve
+evloop
 ;
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Tests (./tools/fam --test src/fence.fam src/disk.fam src/net.fam src/node_serve.fam).
+\ dsk_step is the only NEW logic in this file (serve1's body is byte-identical to the
+\ old serve loop, the dispatch words are unchanged).  Drive dsk_step through its full
+\ state machine on a FAKE device: a heap ns with ns.disk -> a heap ds, a fake qb + dev,
+\ nsec = 2.  We hand-set the device-side used ring to complete each request, exactly
+\ like disk.fam's poll_reap test, and assert the state machine advances correctly:
+\   submit s0 -> reap -> submit s1 -> reap -> all written -> flush -> reap -> DONE.
+\ ──────────────────────────────────────────────────────────────────────────────
+Test {
+ds_machine {
+100 lit alloc                        \ ( ns )
+40000000 lit over 14 lit + !         \ ns.img_base (arbitrary; vwrite only stores it)
+400 lit over 18 lit + !              \ ns.img_size = 0x400 -> nsec = 2 sectors
+0 lit over 5C lit + !                \ dbg off
+\ build ds
+4C lit alloc                         \ ( ns ds )
+100 lit alloc over !                 \ ds.dev (scratch)
+200 lit over @ 10 lit + !            \ dev DeviceFeatures = FLUSH offered (writeback)
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ ds.qb
+0 lit over 8 lit + !                 \ subd 0
+0 lit over C lit + !                 \ usd 0
+0 lit over 10 lit + !                \ next 0
+0 lit over 44 lit + !                \ phase WRITING
+2 lit over 40 lit + !                \ nsec 2
+dup 2 lit pick 6C lit + !            \ ns.disk = ds  (keep ( ns ds ))
+drop                                 \ ( ns )  work via ns.disk from here
+
+\ pass 1: idle + work -> submit sector 0
+dsk_step
+dup 6C lit + @ 8 lit + @ 1 lit asrt_eq          \ ds.subd == 1
+\ complete write 0: used.ring[0].id = slot-0 head (0), used.idx = 1
+dup 6C lit + @ 4 lit + @ 1004 lit + 0 lit swap !
+dup 6C lit + @ 4 lit + @ 1002 lit + 1 lit swap h!
+\ pass 2: reap (usd->1) + submit sector 1
+dsk_step
+dup 6C lit + @ C lit + @ 1 lit asrt_eq          \ ds.usd  == 1 (write 0 reaped)
+dup 6C lit + @ 8 lit + @ 2 lit asrt_eq          \ ds.subd == 2 (sector 1 submitted)
+\ complete write 1: used.ring[1].id = slot-1 head (3), used.idx = 2
+dup 6C lit + @ 4 lit + @ 1004 lit + 8 lit + 3 lit swap !
+dup 6C lit + @ 4 lit + @ 1002 lit + 2 lit swap h!
+\ pass 3: reap (usd->2) -> all written -> issue flush (slot 2), phase FLUSHING
+dsk_step
+dup 6C lit + @ 44 lit + @ 1 lit asrt_eq         \ phase == FLUSHING
+\ complete flush: slot-2 head = 6, used.ring[2].id = 6, used.idx = 3
+dup 6C lit + @ 4 lit + @ 1004 lit + 10 lit + 6 lit swap !
+dup 6C lit + @ 4 lit + @ 1002 lit + 3 lit swap h!
+\ pass 4: reap flush -> phase DONE, ns.disk cleared
+dsk_step
+6C lit + @ 0 lit asrt_eq             \ ns.disk == 0 (save complete)  ( consumes ns )
+}
+\ A disk-booted node (ns.disk == 0) makes dsk_step a no-op and leaves ns untouched.
+ds_idle {
+100 lit alloc                        \ ( ns )
+0 lit over 6C lit + !                \ ns.disk = 0
+dsk_step
+6C lit + @ 0 lit asrt_eq             \ still 0, no crash  ( consumes ns )
+}
+}
