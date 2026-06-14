@@ -1,26 +1,11 @@
 #!/bin/sh
-# Tests for the virtio-blk disk read/write path (src/node_disk.fam), two layers:
-#
-#  1. LOGIC (no device): qzero / dsk_sub / dsk_poll / dsk_rd / dsk_flsh on a FAKE
-#     state block (heap-allocated dst/qb/dev, hand-set used-ring index).  Fast,
-#     gates the submit/poll/read/flush edges, and proves the unit tests need no
-#     device.
-#
-#  2. REAL DEVICE (virtio-blk via --disk): tests/node_disk_dev.fam drives the
-#     actual hardware path -- find_blk -> vblkinit handshake -> dsk_sub/dsk_rd/
-#     dsk_flsh kick -> real DMA -> completion on the real used ring.  `realwr`
-#     writes a 0..255 ramp to sector 0; `rdtrip` writes then reads a sector back;
-#     `flushtr` writes, FLUSHes durable, and reads back.  This script then also
-#     cmp's the ramp realwr left on disk.  Catches handshake/queue/DMA regressions
-#     a fake-memory test never could.
-#
-#  3-5. STORAGE ENGINE on top of the same primitives:
-#     common engine src/node_disk_store.fam (buffer pool + double-buffered meta
-#     sector + page allocator + transaction) and the COW trie src/node_disk_trie.fam
-#     (32-byte hash key -> 8-byte value).  Logic (no device) compiles + unit-tests
-#     both; then the common engine (evict_rt / mt_cycle / tx_rt) and the trie
-#     (trie_rt / trie_split) on a real device.  Grows with the PMMR + bitmap.
+
 set -e
+# q32 runs qemu with `-serial stdio`, so qemu's stdin becomes the guest serial
+# line. Run from an interactive terminal, that stdin is a tty and the --disk
+# (virtio-blk) test hangs at startup until the 60s timeout fires -- but CI has
+# no tty on stdin, so it passes there. Detach stdin so local == CI.
+exec </dev/null
 . "$(dirname "$0")/_common.sh"
 setup_qemu
 build_fam
