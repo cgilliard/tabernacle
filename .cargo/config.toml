@@ -1,9 +1,0 @@
-# Freestanding link configuration: no C runtime startup files (we provide our
-# own `_start`), and a static, non-PIE layout so the binary needs no dynamic
-# linker to apply relocations.
-[target.x86_64-unknown-linux-gnu]
-rustflags = [
-    "-C", "link-arg=-nostartfiles",
-    "-C", "link-arg=-static",
-    "-C", "relocation-model=static",
-]
