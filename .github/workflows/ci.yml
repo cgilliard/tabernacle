@@ -46,6 +46,8 @@ jobs:
           - proof_tabernacle    # tabernacle T2: P1/P2(handoff) + P5a hash-gate + packed + bin_size-invariance + L1/L2 (219/226) + P3 W^X + P4 CFI + D1 DMA + D2 quiesce, all gated
           - test_node_disk      # virtio-blk disk-write path: (1) dsk_sub/dsk_poll state-machine logic on a fake queue, (2) a REAL device test (fam --test --disk=) that writes a ramp + cmp's the bytes on disk
           - test_node_disk      # disk tests
+          - test_node_serve     # serve tests
+          - test_node_serve     # serve tests
     steps:
       - name: Checkout
         uses: actions/checkout@v5
