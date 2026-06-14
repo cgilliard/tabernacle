@@ -1,0 +1,9 @@
+#!/bin/sh
+# P1/P2 (FSM: no jalr / closed CFG) + P3 (W^X) on the bootstrap seed bin/fam0.
+set -e
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+build_fam
+python3 tools/verify_fsm.py bin/fam0
+python3 tools/verify_wx.py  bin/fam0
+python3 tools/verify_cfi.py bin/fam0

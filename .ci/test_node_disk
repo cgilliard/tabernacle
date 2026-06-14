@@ -1,0 +1,84 @@
+#!/bin/sh
+# Tests for the virtio-blk disk read/write path (src/node_disk.fam), two layers:
+#
+#  1. LOGIC (no device): qzero / dsk_sub / dsk_poll / dsk_rd / dsk_flsh on a FAKE
+#     state block (heap-allocated dst/qb/dev, hand-set used-ring index).  Fast,
+#     gates the submit/poll/read/flush edges, and proves the unit tests need no
+#     device.
+#
+#  2. REAL DEVICE (virtio-blk via --disk): tests/node_disk_dev.fam drives the
+#     actual hardware path -- find_blk -> vblkinit handshake -> dsk_sub/dsk_rd/
+#     dsk_flsh kick -> real DMA -> completion on the real used ring.  `realwr`
+#     writes a 0..255 ramp to sector 0; `rdtrip` writes then reads a sector back;
+#     `flushtr` writes, FLUSHes durable, and reads back.  This script then also
+#     cmp's the ramp realwr left on disk.  Catches handshake/queue/DMA regressions
+#     a fake-memory test never could.
+#
+#  3-5. STORAGE ENGINE on top of the same primitives:
+#     common engine src/node_disk_store.fam (buffer pool + double-buffered meta
+#     sector + page allocator + transaction) and the COW trie src/node_disk_trie.fam
+#     (32-byte hash key -> 8-byte value).  Logic (no device) compiles + unit-tests
+#     both; then the common engine (evict_rt / mt_cycle / tx_rt) and the trie
+#     (trie_rt / trie_split) on a real device.  Grows with the PMMR + bitmap.
+set -e
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+build_fam
+
+echo "--- 1) node_disk.fam unit tests (no device, pure logic) ---"
+out=$(./tools/fam --test src/node_disk.fam 2>&1) || { echo "$out"; echo "FAIL: unit tests exited non-zero"; exit 1; }
+echo "$out"
+echo "$out" | grep -qE '[1-9][0-9]* passed' || { echo "FAIL: no unit tests ran (silent compile failure?)"; exit 1; }
+
+echo "--- 2) node_disk REAL virtio-blk device test (--disk) ---"
+DISK=$(mktemp)
+dd if=/dev/zero of="$DISK" bs=512 count=8 2>/dev/null   # fresh, zeroed
+# timeout guards against a handshake regression that would hang the poll loop.
+out=$(timeout 60 ./tools/fam --test --disk="$DISK" src/node_disk.fam tests/node_disk_dev.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: device test exited non-zero (or timed out)"; rm -f "$DISK"; exit 1; }
+echo "$out"
+echo "$out" | grep -q 'realwr' || { echo "FAIL: realwr device test did not run"; rm -f "$DISK"; exit 1; }
+
+echo "--- verify the bytes actually landed on disk (sector 0 == 0..255 ramp) ---"
+python3 - "$DISK" <<'PY' || { echo "FAIL: on-disk bytes do not match what the test wrote"; rm -f "$DISK"; exit 1; }
+import sys
+disk = open(sys.argv[1], "rb").read(512)
+exp  = bytes(i & 0xFF for i in range(512))
+if disk != exp:
+    print("  disk[0:16]  :", disk[:16].hex())
+    print("  expect[0:16]:", exp[:16].hex())
+    sys.exit(1)
+print("  sector 0 matches the written ramp (512 B)")
+PY
+rm -f "$DISK"
+
+echo "--- 3) storage-engine logic (no device): store + trie compile + unit tests ---"
+out=$(./tools/fam --test src/node_disk.fam src/node_disk_store.fam src/node_disk_trie.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: engine logic tests exited non-zero"; exit 1; }
+echo "$out"
+echo "$out" | grep -q 'bp_basic' || { echo "FAIL: pool logic tests did not run"; exit 1; }
+echo "$out" | grep -q 'prims'    || { echo "FAIL: trie primitive tests did not run"; exit 1; }
+
+echo "--- 4) common engine on a real device (pool / meta / transaction) ---"
+DISK=$(mktemp)
+dd if=/dev/zero of="$DISK" bs=512 count=128 2>/dev/null
+out=$(timeout 60 ./tools/fam --test --disk="$DISK" src/node_disk.fam src/node_disk_store.fam tests/node_disk_store_dev.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: store device test exited non-zero (or timed out)"; rm -f "$DISK"; exit 1; }
+echo "$out"
+for t in evict_rt mt_cycle tx_rt; do
+  echo "$out" | grep -q "$t" || { echo "FAIL: store device test $t did not run"; rm -f "$DISK"; exit 1; }
+done
+rm -f "$DISK"
+
+echo "--- 5) COW trie on a real device (32-byte keys: put/get/split/commit/reboot) ---"
+DISK=$(mktemp)
+dd if=/dev/zero of="$DISK" bs=512 count=128 2>/dev/null
+out=$(timeout 60 ./tools/fam --test --disk="$DISK" src/node_disk.fam src/node_disk_store.fam src/node_disk_trie.fam tests/node_disk_trie_dev.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: trie device test exited non-zero (or timed out)"; rm -f "$DISK"; exit 1; }
+echo "$out"
+for t in trie_rt trie_split; do
+  echo "$out" | grep -q "$t" || { echo "FAIL: trie device test $t did not run"; rm -f "$DISK"; exit 1; }
+done
+rm -f "$DISK"
+
+echo "test_node_disk: PASS"

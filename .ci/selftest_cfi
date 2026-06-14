@@ -1,0 +1,5 @@
+#!/bin/sh
+# Prove the P4 (CFI) verifier is not vacuous: it must REJECT a load into a root,
+# a return address (jal) into a root, and an s11 adjustment that isn't +/-4.
+set -e
+python3 tools/verify_cfi.py --selftest

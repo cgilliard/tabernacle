@@ -1,0 +1,13 @@
+#!/bin/sh
+# P1/P2 (FSM: no jalr / closed CFG) + P3 (W^X, modulo the declared imm_tramp
+# trampoline) on the compiler bin/fam.uncompressed.  The packed bin/fam is NOT
+# checked directly here -- a static CFG-walk can't verify a self-extracting
+# binary; it is verified compositionally (clean stub + payload decompresses to
+# this proven image).
+set -e
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+build_fam
+python3 tools/verify_fsm.py bin/fam.uncompressed
+python3 tools/verify_wx.py  bin/fam.uncompressed
+python3 tools/verify_cfi.py bin/fam.uncompressed

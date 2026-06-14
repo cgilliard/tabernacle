@@ -1,0 +1,5 @@
+#!/bin/sh
+# Prove the W^X verifier is not vacuous: it must REJECT stores via an auipc/code
+# pointer or a loaded pointer, and ACCEPT region/MMIO/trampoline-slot bases.
+set -e
+python3 tools/verify_wx.py --selftest

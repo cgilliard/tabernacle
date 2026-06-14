@@ -1,0 +1,32 @@
+#!/bin/sh
+# Exercise every public stdlib word, then:
+#   * P1/P2 prove the EMITTED code (word bodies + fam's call/control/literal
+#     emitters, incl. >2KB backpatched jumps) is a bounded FSM,
+#   * a runtime self-check confirms the compiled program computes the expected
+#     results (catches a hex typo that is legal-RV32I-but-wrong),
+#   * overflow literals must hit the ??? abort path.
+# W^X is NOT asserted here: the program uses !/c!/h! (store to a runtime
+# address) -- the documented escape hatch, like raw `,` for control flow.
+set -e
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+build_fam
+
+python3 tests/gen_cover.py
+./tools/fam -o cover.bin tests/cover.fam
+
+echo "--- P1/P2 (FSM) on the coverage binary ---"
+python3 tools/verify_fsm.py cover.bin
+
+echo "--- runtime self-check vs golden (tests/cover.expected) ---"
+timeout 30 ./tools/q32 cover.bin > cover.out
+diff -u tests/cover.expected cover.out
+
+echo "--- overflow literals must abort (??? error path) ---"
+for lit in "4294967296u" "-2147483649" "999999999999u"; do
+    printf '%s lit drop bye\n' "$lit" > ov.fam
+    out=$(./tools/fam -o ov.bin ov.fam 2>&1 || true)
+    [ "$out" = "?" ] || { echo "FAIL: '$lit' did not abort (got: '$out')"; exit 1; }
+    echo "  $lit -> aborted OK"
+done
+echo "proof_cover: PASS"

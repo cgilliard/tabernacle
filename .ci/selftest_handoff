@@ -1,0 +1,6 @@
+#!/bin/sh
+# Prove the P5 (handoff-gate) verifier is not vacuous: it must REJECT an
+# unconditional jump to the payload, a branch whose both arms reach one exit,
+# and an empty image -- and ACCEPT a properly hash-gated exit.
+set -e
+python3 tools/verify_handoff.py --selftest
