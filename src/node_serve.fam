@@ -21,7 +21,8 @@
 :M _a2 1301C1FF , 2320C100 , ;     \ addi sp,sp,-4 ; sw a2,0(sp)
 :M _a3 1301C1FF , 2320D100 , ;     \ addi sp,sp,-4 ; sw a3,0(sp)
 :M _a4 1301C1FF , 2320E100 , ;     \ addi sp,sp,-4 ; sw a4,0(sp)
-\ (fence_io / fence_r + the virtio-blk words live in src/node_disk.fam, compiled first)
+\ (fence_io / fence_r + the virtio-blk words live in src/disk.fam, compiled first;
+\ the net primitives live in src/net.fam, compiled just before this file)
 
 \ ===== output / debug =====
 : putnib
@@ -73,156 +74,15 @@ then then then then
 30 lit + putc
 ;
 
-\ ===== net primitives =====
-: ip_csum
-0 lit swap
-dup c@ 8 lit lshift over 1 lit + c@ or rot + swap
-dup 2 lit + c@ 8 lit lshift over 3 lit + c@ or rot + swap
-dup 4 lit + c@ 8 lit lshift over 5 lit + c@ or rot + swap
-dup 6 lit + c@ 8 lit lshift over 7 lit + c@ or rot + swap
-dup 8 lit + c@ 8 lit lshift over 9 lit + c@ or rot + swap
-dup A lit + c@ 8 lit lshift over B lit + c@ or rot + swap
-dup C lit + c@ 8 lit lshift over D lit + c@ or rot + swap
-dup E lit + c@ 8 lit lshift over F lit + c@ or rot + swap
-dup 10 lit + c@ 8 lit lshift over 11 lit + c@ or rot + swap
-dup 12 lit + c@ 8 lit lshift over 13 lit + c@ or rot + swap
-drop
-dup 10 lit rshift swap FFFF lit and +
-dup 10 lit rshift swap FFFF lit and +
-invert FFFF lit and
-;
-
-: find_net
-10008000 lit
-begin dup 8 lit + @ 1 lit <> while
-1000 lit -
-dup 10001000 lit u< if "no net\n" puts bye then
-repeat
-;
-
-: wzero
-begin dup 0 lit > while
-swap dup 0 lit swap ! 4 lit + swap 1 lit -
-repeat drop drop
-;
-
-: mcopy1
-over c@ over c!
-1 lit + swap 1 lit + swap
-;
-
-: mcopy
-begin dup 0 lit > while
-1 lit -
-rot rot mcopy1 rot
-repeat
-drop drop drop
-;
-
-\ ===== virtio-net device + queues =====
-: net_init
-dup 4 lit + @ 800 lit wzero
-dup 8 lit + @ 800 lit wzero
-dup @
-dup 70 lit + 0 lit swap !
-dup 70 lit + 1 lit swap !
-dup dup 70 lit + @ 2 lit or swap 70 lit + !
-dup 20 lit + 0 lit swap !
-dup dup 70 lit + @ 8 lit or swap 70 lit + !
-dup 28 lit + 1000 lit swap !
-dup 30 lit + 0 lit swap !
-dup 38 lit + 10 lit swap !
-dup 3C lit + 1000 lit swap !
-over 4 lit + @ C lit rshift over 40 lit + !
-dup 30 lit + 1 lit swap !
-dup 38 lit + 2 lit swap !
-dup 3C lit + 1000 lit swap !
-over 8 lit + @ C lit rshift over 40 lit + !
-dup dup 70 lit + @ 4 lit or swap 70 lit + !
-drop
-;
-
-: rx_setup
-0 lit over 24 lit + !
-begin
-  dup 24 lit + @ 10 lit <
-while
-  dup 4 lit + @
-  over 24 lit + @ 4 lit lshift +
-  over 28 lit + !
-  dup C lit + @
-  over 24 lit + @
-  dup A lit lshift swap 9 lit lshift +
-  +
-  over 28 lit + @ !
-  dup 28 lit + @ 4 lit + 0 lit swap !
-  600 lit over 28 lit + @ 8 lit + !
-  2 lit over 28 lit + @ C lit + h!
-  0 lit over 28 lit + @ E lit + h!
-  dup 24 lit + @
-  over 4 lit + @ 104 lit +
-  over 1 lit lshift +
-  swap over h!
-  drop
-  dup 24 lit + dup @ 1 lit + swap !
-repeat
-dup 4 lit + @
-dup 100 lit + 0 lit swap h!
-102 lit + 10 lit swap h!
-;
-
-: tx_send
-dup 1C lit + dup @ 1 lit + swap !
-dup 8 lit + @
-over 10 lit + @ over !
-dup 4 lit + 0 lit swap !
-over 24 lit + @ over 8 lit + !
-dup C lit + 0 lit swap h!
-dup E lit + 0 lit swap h!
-dup 20 lit + 0 lit swap h!
-dup 24 lit + 0 lit swap h!
-dup 26 lit + 0 lit swap h!
-over 1C lit + @ over 22 lit + h!
-drop
-fence_io
-dup @ 50 lit + 1 lit swap !
-dup 8 lit + @ 1000 lit +
-over 1C lit + @ FFFF lit and
-begin
-  over 2 lit + h@ over <>
-while
-repeat
-drop drop
-;
-
-: tx_send2
-dup 1C lit + dup @ 1 lit + swap !
-dup 8 lit + @
-over 10 lit + @ over !
-dup 4 lit + 0 lit swap !
-3B lit over 8 lit + !
-dup C lit + 1 lit swap h!
-dup E lit + 1 lit swap h!
-over 3C lit + @ over 10 lit + !
-dup 14 lit + 0 lit swap !
-over 30 lit + @ over 18 lit + !
-dup 1C lit + 0 lit swap h!
-dup 1E lit + 0 lit swap h!
-dup 20 lit + 0 lit swap h!
-dup 24 lit + 0 lit swap h!
-dup 26 lit + 0 lit swap h!
-over 1C lit + @ over 22 lit + h!
-drop
-fence_io
-dup @ 50 lit + 1 lit swap !
-dup 8 lit + @ 1000 lit +
-over 1C lit + @ FFFF lit and
-begin
-  over 2 lit + h@ over <>
-while
-repeat
-drop drop
-;
+\ ===== blocking send wrappers (Stage 1) =====
+\ The net device path now lives in src/net.fam as non-blocking primitives
+\ (rx_poll / rx_done / tx_post / tx_post2 / tx_busy), compiled just before this
+\ file.  node_serve's dispatch still wants a send-and-wait (the BIN0 chunk burst
+\ in hnd_famc reuses one TX buffer, so each chunk must drain before the next), so
+\ rebuild the old blocking tx_send / tx_send2 from the primitives: post, then spin
+\ on tx_busy.  Stage 2 makes the serve loop fully non-blocking and these go away.
+: tx_send   tx_post   begin tx_busy 0 lit = until ;
+: tx_send2  tx_post2  begin tx_busy 0 lit = until ;
 
 \ ===== BIN0 dispatch =====
 : arp_hand
@@ -446,16 +306,8 @@ then
 
 : serve
 begin
-  dup 4 lit + @ 1002 lit + h@
-  over 20 lit + @ <>
-  if
-    dup 20 lit + @ F lit and 3 lit lshift
-    over 4 lit + @ + 1004 lit + @
-    over 38 lit + !
-    dup 38 lit + @
-    dup A lit lshift swap 9 lit lshift +
-    over C lit + @ +
-    over 34 lit + !
+  rx_poll dup if
+    drop                                 \ frame acquired; it lives at ns+0x34
     \ Queue depth check: skip non-ARP packets when backlog > 8
     dup 4 lit + @ 1002 lit + h@
     over 20 lit + @ - FFFF lit and
@@ -481,16 +333,9 @@ begin
       arp_hand
       hnd_famc
     then
-    dup 4 lit + @ 102 lit + h@
-    over 28 lit + !
-    dup 28 lit + @ F lit and 1 lit lshift
-    over 4 lit + @ + 104 lit +
-    over 38 lit + @ swap h!
-    dup 28 lit + @ 1 lit +
-    over 4 lit + @ 102 lit + h!
-    dup @ 50 lit + 0 lit swap !
-    dup 20 lit + @ 1 lit + FFFF lit and
-    over 20 lit + !
+    rx_done                              \ recycle the RX buffer + advance rx_last
+  else
+    drop                                 \ no packet this pass
   then
 0 lit
 until
@@ -521,28 +366,30 @@ swap dup if else drop E99 lit then over 68 lit + !   \ ns+0x68 eff_port (a2, 0 -
 \ is a fast disk-boot instead of re-downloading.  ( bootsrc ns )
 swap 1 lit = if                \ ( ns )
   "disk_write\n" puts
-  dup 14 lit + @                 \ ( ns img_base )                   src
-  over 18 lit + @ 1FF lit + FFFFFE00 lit and   \ ( ns img_base remaining )  round up to 512
-  1C lit alloc                   \ disk-write state dst ( ns img_base remaining dst )
-  tuck 8 lit + !                 \ dst[8]  = remaining; ( ns img_base dst )
-  tuck 10 lit + !                \ dst[16] = src (img_base); ( ns dst )
-  dup C lit + 0 lit swap !       \ dst[12] = sector 0
-  dup 14 lit + 0 lit swap !      \ dst[20] = aidx 0
-  dup 18 lit + 0 lit swap !      \ dst[24] = inflight 0
-  5000 lit alloc FFF lit + FFFFF000 lit and   \ page-aligned queue ( ns dst qb )
-  dup qzero
-  over 4 lit + !                 \ dst[4] = qb; ( ns dst )
-  find_blk over !                \ dst[0] = virtio-blk dev; ( ns dst )
+  40 lit alloc                   \ disk state ds ( ns ds )
+  0 lit over 8 lit + !           \ ds.subd = 0
+  0 lit over C lit + !           \ ds.usd  = 0
+  0 lit over 10 lit + !          \ ds.next = 0
+  5000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !   \ ds.qb (page-aligned, zeroed)
+  find_blk over !                \ ds.dev = virtio-blk dev
   vblkinit
-  \ STANDALONE poll loop: spin dsk_poll (submit -> poll completion -> advance ->
-  \ submit next) until the whole image is written.  Later this single dsk_poll
-  \ call moves into the serve loop so the write overlaps with serving.
-  begin dup 8 lit + @ 0 lit > over 18 lit + @ or while
-    dsk_poll
+  \ STANDALONE drive loop: write sectors 0..nsec-1, one at a time, where the next
+  \ sector to write IS ds.subd (vwrite advances it) and nsec = roundup(img_size,512).
+  \ vwrite + vwait keeps a single request in flight; Stage 2 folds vpoll into the
+  \ serve loop (and can pipeline up to 5 slots) so the write overlaps with serving.
+  begin
+    dup 8 lit + @                              \ sec = subd            ( ns ds sec )
+    2 lit pick 18 lit + @ 1FF lit + 9 lit rshift  \ nsec                ( ns ds sec nsec )
+    u<                                         \ sec < nsec ?          ( ns ds flag )
+  while
+    dup 8 lit + @                              \ sec                   ( ns ds sec )
+    2 lit pick 14 lit + @ over 9 lit lshift +  \ src = img_base+sec*512 ( ns ds sec src )
+    vwrite                                     \ ( ns ds id )
+    vwait drop                                 \ drive to completion, drop id ( ns ds )
   repeat
-  dsk_flsh                        \ vblkinit may have negotiated writeback -> force
-                                  \ the image durable before the next boot trusts it
-  drop                           \ ( ns )
+  vflush                          \ vblkinit may have negotiated writeback -> force the
+  dup FFFFFFFF lit <> if vwait drop else drop then   \ image durable before next boot
+  drop                           \ ( ns )  drop ds
   "disk_write done\n" puts
 then
 \ ( ns )

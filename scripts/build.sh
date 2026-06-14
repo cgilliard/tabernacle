@@ -80,7 +80,9 @@ run bin/full_node.bin \
 	bin/fam \
 	lib/stdlib.fam \
 	lib/build.fam \
-	src/node_disk.fam \
+	src/fence.fam \
+	src/disk.fam \
+	src/net.fam \
 	src/node_serve.fam \
 	src/full_node.fam
 cat resources/bible.compressed >> bin/full_node.bin

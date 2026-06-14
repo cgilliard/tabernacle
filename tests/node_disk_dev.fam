@@ -1,118 +1,100 @@
 \ ──────────────────────────────────────────────────────────────────────────────
-\ tests/node_disk_dev.fam — REAL virtio-blk device tests for the disk read/write path.
+\ tests/node_disk_dev.fam — REAL virtio-blk device tests for the multi-slot disk
+\ primitives in src/disk.fam (vreq / vflush / vpoll / vstat).
 \
-\ src/node_disk.fam's own tests fake the queue in RAM; these drive the ACTUAL
-\ device end to end: find_blk -> vblkinit handshake -> dsk_sub/dsk_rd kick -> real
-\ DMA -> completion on the device's used ring.  `realwr` writes a sector; `rdtrip`
-\ writes then reads a sector back and confirms the bytes survived the round trip
-\ (the real test of dsk_rd).  They depend on the words in src/node_disk.fam, so
-\ compile the two together, and they MUST run with a disk attached:
-\     ./tools/fam --test --disk=scratch.img src/node_disk.fam tests/node_disk_dev.fam
+\ src/disk.fam's own tests fake the queue in RAM; these drive the ACTUAL device end
+\ to end: find_blk -> vblkinit handshake -> vreq kick -> real DMA -> completion on
+\ the device's used ring (reaped by vpoll).  `realwr` writes a sector; `rdtrip`
+\ writes then reads a sector back and confirms the bytes survived the round trip;
+\ `flushtr` writes, FLUSHes durable, and reads back.  Compile the two together and
+\ run with a disk attached:
+\     ./tools/fam --test --disk=scratch.img src/disk.fam tests/node_disk_dev.fam
 \ With no --disk, find_blk finds no block device, prints "no blk" and halts.  The
 \ CI job test_node_disk supplies a fresh zeroed scratch image, then byte-checks
-\ sector 0 against the ramp this test writes.
+\ sector 0 against the ramp `realwr` writes.
 \ ──────────────────────────────────────────────────────────────────────────────
+
+\ ramp ( buf -- buf )  buf[i] = i & 0xFF for 512 bytes (a recognizable pattern).
+: ramp
+0 lit
+begin dup 200 lit u< while
+  2dup + over FF lit and swap c!
+  1 lit +
+repeat
+drop
+;
+
+\ drvto ( id ds -- id ds )  pump vpoll until done[id] == 1 (the request completed
+\ on the real used ring).  Reaching past this proves the whole device path worked.
+: drvto
+begin
+  vpoll
+  dup 2 lit pick 4 lit * + 14 lit + @     \ done[id]  (ds + 0x14 + id*4)
+until
+;
+
+\ dsinit ( ds -- ds )  zero the cursors, page-align + zero qb, find + handshake dev.
+: dsinit
+0 lit over 8 lit + !                       \ subd = 0
+0 lit over C lit + !                       \ usd  = 0
+0 lit over 10 lit + !                      \ next = 0
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ qb (page-aligned)
+dup 4 lit + @ qzero
+find_blk over !                            \ dev
+vblkinit
+;
 
 Test {
 \ Write one 512-byte sector (a 0..255 ramp) to sector 0 of the real disk and drive
 \ it to completion.  The device clears the status byte to 0 (VIRTIO_BLK_S_OK) only
-\ after it has actually DMA'd and committed the write -- and the poll loop only
-\ exits once the real used-ring index advances -- so reaching this assertion proves
-\ the whole device path worked.  (The CI job additionally cmp's the bytes on disk.)
+\ after it has DMA'd and committed the write, and vpoll only flips done[0] once the
+\ real used-ring index advances -- so reaching these assertions proves the device
+\ path worked.  (The CI job additionally cmp's the bytes on disk.)
 realwr {
-\ source buffer: buf[i] = i & 0xFF  (a recognizable ramp the CI side regenerates)
-200 lit alloc                       \ ( buf )
-0 lit                               \ ( buf i )
-begin dup 200 lit u< while
-  2dup +                            \ ( buf i buf+i )
-  over FF lit and                   \ ( buf i buf+i i&FF )
-  swap c!                           \ store i&FF at buf+i -> ( buf i )
-  1 lit +
-repeat
-drop                                \ ( buf )
-\ disk-write state block (mirrors node_serve.fam's runsrv disk-save setup)
-1C lit alloc                        \ ( buf dst )
-swap over 10 lit + !                \ dst[0x10] = src = buf ; ( dst )
-200 lit over 8 lit + !              \ dst[0x08] = remaining = 512
-0 lit over C lit + !                \ dst[0x0C] = sector 0
-0 lit over 14 lit + !               \ dst[0x14] = aidx 0
-0 lit over 18 lit + !               \ dst[0x18] = inflight 0
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ dst[0x04] = page-aligned queue
-find_blk over !                     \ dst[0x00] = virtio-blk dev
-vblkinit                            \ handshake + queue config
-\ drive the write to completion against the REAL used ring
-begin dup 8 lit + @ 0 lit > over 18 lit + @ or while dsk_poll repeat
-\ device reported success, and the full sector was consumed
-dup 4 lit + @ 2010 lit + c@ 0 lit asrt_eq    \ status byte == VIRTIO_BLK_S_OK
-8 lit + @ 0 lit asrt_eq                       \ remaining == 0  ( consumes dst )
+200 lit alloc ramp                   \ ( buf )
+40 lit alloc dsinit                  \ ( buf ds )
+swap 1 lit swap 0 lit swap           \ ( ds type=1 sector=0 buf )
+vreq                                 \ ( ds id )
+swap drvto                           \ ( id ds )  drive write to completion
+dup 4 lit + @ 2010 lit + c@ 0 lit asrt_eq    \ slot 0 status == VIRTIO_BLK_S_OK
+swap 0 lit asrt_eq                   \ slot id == 0           ( ds )
+8 lit + @ 1 lit asrt_eq              \ subd == 1   ( consumes ds )
 }
 \ Round trip: write a 0..255 ramp to sector 5, read it back into a FRESH (zeroed)
-\ buffer with dsk_rd, and confirm the bytes survived.  Since the read buffer starts
-\ zero, matching the ramp proves dsk_rd actually DMA'd the right sector's data in.
+\ buffer, and confirm the bytes survived.  Since the read buffer starts zero,
+\ matching the ramp proves the read actually DMA'd the right sector's data in.
 rdtrip {
-\ source buffer: wbuf[i] = i & 0xFF
-200 lit alloc                       \ ( wbuf )
-0 lit
-begin dup 200 lit u< while
-  2dup + over FF lit and swap c!
-  1 lit +
-repeat
-drop                                \ ( wbuf )
-\ shared dst on the real device; write sector 5 first
-1C lit alloc                        \ ( wbuf dst )
-swap over 10 lit + !                \ dst.src = wbuf
-5 lit over C lit + !                \ dst.sector = 5
-200 lit over 8 lit + !              \ dst.remaining = 512
-0 lit over 14 lit + !               \ dst.aidx = 0
-0 lit over 18 lit + !               \ dst.inflight = 0
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ dst.qb (page-aligned)
-find_blk over !                     \ dst.dev
-vblkinit
-begin dup 8 lit + @ 0 lit > over 18 lit + @ or while dsk_poll repeat
-\ the write loop advanced dst.sector to 6; reset it and read sector 5 back
-5 lit over C lit + !                \ dst.sector = 5 again
-200 lit alloc                       \ ( dst rbuf )  fresh -> QEMU-zero
-2dup swap 10 lit + !                \ dst.src = rbuf (read destination)
-swap dsk_rd swap                    \ ( dst rbuf )  read sector 5 into rbuf, blocks
-\ rbuf must now hold the ramp (it was all-zero before the read)
-dup c@ 0 lit asrt_eq                \ rbuf[0]   == 0
-dup 64 lit + c@ 64 lit asrt_eq      \ rbuf[100] == 100
-dup FF lit + c@ FF lit asrt_eq      \ rbuf[255] == 255
-dup 100 lit + c@ 0 lit asrt_eq      \ rbuf[256] == 0   (ramp wraps)
-1FF lit + c@ FF lit asrt_eq         \ rbuf[511] == 255  ( consumes rbuf )
-drop                                \ drop dst
+200 lit alloc ramp                   \ ( wbuf )
+40 lit alloc dsinit                  \ ( wbuf ds )
+swap 1 lit swap 5 lit swap           \ ( ds 1 5 wbuf )
+vreq swap drvto                      \ ( id ds )  write sector 5
+swap drop                            \ ( ds )  drop write id
+200 lit alloc tuck                   \ ( rbuf ds rbuf )  fresh -> QEMU-zero
+0 lit swap 5 lit swap                \ ( rbuf ds 0 5 rbuf )
+vreq swap drvto                      \ ( rbuf id ds )  read sector 5 into rbuf
+drop drop                            \ ( rbuf )
+dup c@ 0 lit asrt_eq                 \ rbuf[0]   == 0
+dup 64 lit + c@ 64 lit asrt_eq       \ rbuf[100] == 100
+dup FF lit + c@ FF lit asrt_eq       \ rbuf[255] == 255
+dup 100 lit + c@ 0 lit asrt_eq       \ rbuf[256] == 0   (ramp wraps)
+1FF lit + c@ FF lit asrt_eq          \ rbuf[511] == 255  ( consumes rbuf )
 }
-\ Flush: write a sector, dsk_flsh it durable, confirm the flush ran and the data
-\ survived.  QEMU's default writeback drive offers VIRTIO_BLK_F_FLUSH, so vblkinit
-\ negotiates it and dsk_flsh issues a real FLUSH (aidx advances past the write).
+\ Flush: write a sector, vflush it durable, drive the flush to completion, then read
+\ the sector back to confirm the data is intact.  QEMU's default writeback drive
+\ offers VIRTIO_BLK_F_FLUSH, so vblkinit negotiates it and vflush issues a real FLUSH
+\ (a non-negative slot id); drvto then proves the flush completed on the device.
 flushtr {
-\ wbuf[i] = i & 0xFF
-200 lit alloc                       \ ( wbuf )
-0 lit
-begin dup 200 lit u< while
-  2dup + over FF lit and swap c!
-  1 lit +
-repeat
-drop                                \ ( wbuf )
-1C lit alloc                        \ ( wbuf dst )
-swap over 10 lit + !                \ dst.src = wbuf
-7 lit over C lit + !                \ dst.sector = 7
-200 lit over 8 lit + !              \ dst.remaining = 512
-0 lit over 14 lit + !               \ dst.aidx = 0
-0 lit over 18 lit + !               \ dst.inflight = 0
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ dst.qb
-find_blk over !                     \ dst.dev
-vblkinit                            \ negotiates FLUSH if the device offers it
-begin dup 8 lit + @ 0 lit > over 18 lit + @ or while dsk_poll repeat   \ write (aidx 0->1)
-dsk_flsh                            \ FLUSH durable (aidx 1->2 in writeback)
-dup 14 lit + @ 2 lit asrt_eq        \ flush actually ran (aidx advanced past the write)
-dup 4 lit + @ 2010 lit + c@ 0 lit asrt_eq    \ flush status == VIRTIO_BLK_S_OK
-\ read sector 7 back to confirm the data is intact
-7 lit over C lit + !                \ dst.sector = 7
-200 lit alloc                       \ ( dst rbuf )
-2dup swap 10 lit + !                \ dst.src = rbuf
-swap dsk_rd swap                    \ read sector 7 -> rbuf
-FF lit + c@ FF lit asrt_eq          \ rbuf[255] == 255  ( consumes rbuf )
-drop                                \ drop dst
+200 lit alloc ramp                   \ ( wbuf )
+40 lit alloc dsinit                  \ ( wbuf ds )
+swap 1 lit swap 7 lit swap           \ ( ds 1 7 wbuf )
+vreq swap drvto                      \ ( id ds )  write sector 7
+swap drop                            \ ( ds )
+vflush                               \ ( ds fid )
+dup FFFFFFFF lit <> if swap drvto swap drop else drop then   \ flush durable ( ds )
+200 lit alloc tuck                   \ ( rbuf ds rbuf )
+0 lit swap 7 lit swap                \ ( rbuf ds 0 7 rbuf )
+vreq swap drvto                      \ ( rbuf id ds )  read sector 7 back
+drop drop                            \ ( rbuf )
+FF lit + c@ FF lit asrt_eq           \ rbuf[255] == 255  ( consumes rbuf )
 }
 }

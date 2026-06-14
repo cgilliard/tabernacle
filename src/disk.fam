@@ -1,0 +1,401 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ src/disk.fam — virtio-blk read/write/flush, MULTI-SLOT non-blocking primitives.
+\
+\ Replaces the single-slot src/node_disk.fam.  The interface mirrors the async
+\ disk demo in tmp/diskasync.fam (vreq / vpoll / vstat), but block-based: all
+\ singleton state lives in a caller-allocated `ds` block, NOT fam globals (the
+\ node forbids globals — its variable region overlaps the served image).
+\
+\ Non-blocking; the caller owns the poll loop:
+\   vreq   ( ds type sector buf -- ds id )  build + kick a request; return its slot
+\                                           id and return now.  type 1=write 0=read.
+\   vflush ( ds -- ds id )                  durable barrier (VIRTIO_BLK_F_FLUSH);
+\                                           id = -1 if the device runs writethrough.
+\   vpoll  ( ds -- ds )                     reap finished requests into done[]; now.
+\   vstat  ( ds id -- ds done? )            pure read of done[id].
+\
+\ Up to 5 requests in flight (5 slots × 3 descriptors = 15 of 16 descriptors).
+\ id = slot.  Slot i: descriptors i*3..i*3+2 at qb + i*0x30 ; header+status at
+\ qb + 0x2000 + i*0x20.  Queue rings: avail @ qb+0x100, used @ qb+0x1000.
+\
+\ State block `ds` (caller-allocated, 0x40 bytes, qb zeroed):
+\   ds+0x00 dev     virtio-blk MMIO base
+\   ds+0x04 qb      queue buffer base (page-aligned, >= 0x2100 bytes, zeroed)
+\   ds+0x08 subd    total requests submitted   (drives avail.idx)
+\   ds+0x0C usd     total completions reaped    (used-ring cursor)
+\   ds+0x10 next    next slot id to hand out (rotates 0..4)
+\   ds+0x14 done[0..4]                          (5 words: 1 = completed)
+\   ds+0x28 r_type  ┐ transient: the request currently being built by vreq.
+\   ds+0x2C r_sector│ single-threaded, so one build scratch is reused per slot;
+\   ds+0x30 r_buf   │ the built request then lives in its slot's qb regions,
+\   ds+0x34 r_id    │ independent of this scratch, so many can be in flight.
+\   ds+0x38 r_d     │ desc base  = qb + r_id*0x30
+\   ds+0x3C r_h     ┘ hdr  base  = qb + 0x2000 + r_id*0x20
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ fence_io / fence_r come from src/fence.fam, compiled before this file.
+
+\ ── find_blk ( -- dev )  scan the MMIO bus for a virtio device with DeviceID 2 ──
+: find_blk
+10008000 lit
+begin dup 8 lit + @ 2 lit <> while
+1000 lit -
+dup 10001000 lit u< if "no blk\n" puts bye then
+repeat
+;
+
+\ ── vblkinit ( ds -- ds )  virtio handshake + queue-0 config (ds[0]=dev, ds[4]=qb) ──
+\ Negotiates VIRTIO_BLK_F_FLUSH (bit 9 = 0x200) IF the device offers it: that selects
+\ writeback caching (writes complete into a volatile cache, vflush makes them durable).
+\ If the device doesn't offer it we negotiate nothing and run writethrough.
+: vblkinit
+dup @ dup 70 lit + 0 lit swap !
+dup 70 lit + 1 lit swap !
+dup dup 70 lit + @ 2 lit or swap 70 lit + !
+dup 10 lit + @ 200 lit and over 20 lit + !   \ DriverFeatures = offered & FLUSH(bit 9)
+dup dup 70 lit + @ 8 lit or swap 70 lit + !
+dup 28 lit + 1000 lit swap !
+dup 30 lit + 0 lit swap !
+dup 3C lit + 1000 lit swap !
+dup 38 lit + 10 lit swap !                    \ QueueNum = 16
+drop
+dup 4 lit + @ C lit rshift
+over @ 40 lit + !
+dup @ dup 70 lit + @ 4 lit or swap 70 lit + !
+;
+
+\ ── qzero ( qb -- )  zero 16 KiB (4096 words) at qb ──
+: qzero
+1000 lit
+begin
+dup 0 lit > while
+swap
+dup 0 lit swap !
+4 lit +
+swap 1 lit -
+repeat
+drop drop
+;
+
+\ ===== slot allocator + per-request build helpers (all ( ds -- ds )) =====
+
+\ nslot ( ds -- ds id )  claim the next slot id and advance the rotating allocator.
+: nslot
+dup 10 lit + @                       \ id = next
+dup 1 lit + dup 5 lit u< if else drop 0 lit then   \ next' = (id+1)<5 ? id+1 : 0
+2 lit pick 10 lit + !                \ ds.next = next'
+;
+
+\ rbase ( ds -- ds )  recompute r_d / r_h from qb + r_id (call after r_id is set).
+: rbase
+dup 4 lit + @ over 34 lit + @        \ ( ds qb id )
+2dup 30 lit * + 3 lit pick 38 lit + !            \ r_d = qb + id*0x30
+over over 20 lit * + 2000 lit + 3 lit pick 3C lit + !   \ r_h = qb + 0x2000 + id*0x20
+drop drop
+;
+
+\ clrd ( ds -- ds )  mark the current slot pending: done[r_id] = 0.
+: clrd
+dup 34 lit + @ 4 lit * over 14 lit + + 0 lit swap !
+;
+
+\ whdr ( ds -- ds )  write the 16-B request header + arm the status byte at r_h.
+: whdr
+dup 3C lit + @                       \ ( ds h )
+over 28 lit + @ over !               \ r_type   @ h+0
+0 lit over 4 lit + !                 \ reserved
+over 2C lit + @ over 8 lit + !       \ r_sector @ h+8
+0 lit over C lit + !                 \ sector hi
+FF lit over 10 lit + c!              \ status   @ h+0x10  (device clears it)
+drop
+;
+
+\ wd0 ( ds -- ds )  descriptor 0: the header (16B, device-reads), chains to desc 1.
+: wd0
+dup 38 lit + @                       \ ( ds d )
+over 3C lit + @ over !               \ addr = r_h
+0 lit over 4 lit + !
+10 lit over 8 lit + !                \ len 16
+1 lit over C lit + h!                \ flags NEXT
+over 34 lit + @ 3 lit * 1 lit + over E lit + h!   \ next = id*3+1
+drop
+;
+
+\ wd1 ( ds -- ds )  descriptor 1: the 512-B data buffer.  Write request => device
+\ reads it (flags NEXT); read request (type 0) => device WRITES it (flags NEXT|WRITE).
+: wd1
+dup 38 lit + @ 10 lit +              \ ( ds d1 )  = r_d + 0x10
+over 30 lit + @ over !               \ addr = r_buf
+0 lit over 4 lit + !
+200 lit over 8 lit + !               \ len 512
+over 28 lit + @ 0 lit = if 3 lit else 1 lit then over C lit + h!   \ read?NEXT|WRITE:NEXT
+over 34 lit + @ 3 lit * 2 lit + over E lit + h!   \ next = id*3+2
+drop
+;
+
+\ wd2 ( ds -- ds )  descriptor 2: the 1-B status (device-writes), end of chain.
+: wd2
+dup 38 lit + @ 20 lit +              \ ( ds d2 )  = r_d + 0x20
+over 3C lit + @ 10 lit + over !      \ addr = r_h + 0x10 (status byte)
+0 lit over 4 lit + !
+1 lit over 8 lit + !                 \ len 1
+2 lit over C lit + h!                \ flags WRITE
+0 lit over E lit + h!                \ next 0
+drop
+;
+
+\ subq ( ds -- ds )  publish the current slot's chain in the avail ring + kick.
+: subq
+dup 34 lit + @ 3 lit *               \ head = r_id*3
+over 8 lit + @ F lit and 1 lit lshift            \ (subd & 15) * 2
+2 lit pick 4 lit + @ 104 lit + +     \ &avail.ring[subd & 15]
+h!                                   \ ring[..] = head
+dup 8 lit + @ 1 lit + over 4 lit + @ 102 lit + h!   \ avail.idx = subd+1
+dup 8 lit + @ 1 lit + over 8 lit + !             \ subd += 1
+fence_io
+dup @ 50 lit + 0 lit swap !          \ QueueNotify queue 0
+;
+
+\ ══════════════════════════════════════════════════════════════════════════════
+\ PUBLIC NON-BLOCKING INTERFACE
+\ ══════════════════════════════════════════════════════════════════════════════
+
+\ vreq ( ds type sector buf -- ds id )  SUBMIT a 1-sector request; return slot id.
+: vreq
+3 lit pick 30 lit + !                \ ds.r_buf    = buf
+2 lit pick 2C lit + !                \ ds.r_sector = sector
+over 28 lit + !                      \ ds.r_type   = type
+nslot                                \ ( ds id )
+over 34 lit + !                      \ ds.r_id     = id
+rbase clrd whdr wd0 wd1 wd2 subq
+dup 34 lit + @                       \ ( ds id )
+;
+
+\ vflush ( ds -- ds id )  durable barrier; id = -1 (FFFFFFFF) in writethrough mode.
+\ Builds a no-data 2-descriptor chain (header type 4 -> status) in a fresh slot.
+: vflush
+dup @ 10 lit + @ 200 lit and if      \ device offers VIRTIO_BLK_F_FLUSH? (writeback)
+  nslot over 34 lit + !              \ claim slot -> r_id
+  rbase clrd
+  \ header: type 4 (flush), sector ignored, status armed
+  dup 3C lit + @                     \ ( ds h )
+  4 lit over !
+  0 lit over 4 lit + !
+  0 lit over 8 lit + !
+  0 lit over C lit + !
+  FF lit over 10 lit + c!
+  drop
+  \ desc0: header (16B, device-reads), NEXT -> status
+  dup 38 lit + @                     \ ( ds d )
+  over 3C lit + @ over !             \ addr = r_h
+  0 lit over 4 lit + !
+  10 lit over 8 lit + !
+  1 lit over C lit + h!              \ flags NEXT
+  over 34 lit + @ 3 lit * 1 lit + over E lit + h!   \ next = id*3+1
+  drop
+  \ desc1: status byte (1B, device-writes), end of chain (no data buffer)
+  dup 38 lit + @ 10 lit +            \ ( ds d1 )
+  over 3C lit + @ 10 lit + over !    \ addr = r_h + 0x10
+  0 lit over 4 lit + !
+  1 lit over 8 lit + !
+  2 lit over C lit + h!              \ flags WRITE
+  0 lit over E lit + h!              \ next 0
+  drop
+  subq
+  dup 34 lit + @                     \ ( ds id )
+else
+  FFFFFFFF lit                       \ writethrough: nothing to flush
+then
+;
+
+\ vpoll ( ds -- ds )  reap every finished request into done[]; never waits.
+: vpoll
+begin
+  dup 4 lit + @ 1002 lit + h@         \ device's used.idx (16-bit)
+  over C lit + @ FFFF lit and         \ our cursor (16-bit)
+  <>
+while
+  fence_r                             \ order used-ring + DMA reads after seeing idx
+  dup C lit + @ F lit and 3 lit lshift            \ (usd & 15) * 8
+  over 4 lit + @ 1004 lit + + @        \ used.ring[usd & 15].id = head descriptor
+  3 lit /                              \ slot = head / 3
+  4 lit * over 14 lit + + 1 lit swap ! \ done[slot] = 1
+  dup C lit + @ 1 lit + over C lit + ! \ usd += 1
+repeat
+;
+
+\ vstat ( ds id -- ds done? )  pure read of done[id].
+: vstat
+4 lit * over 14 lit + + @
+;
+
+\ vwrite ( ds sector buf -- ds id )  submit a WRITE (type 1) of one sector; no wait.
+\ Convenience over vreq: takes args in a node-friendly order (no type), so the
+\ sequential image-save loop need not juggle the stack.
+: vwrite
+2 lit pick 30 lit + !                \ ds.r_buf    = buf
+over 2C lit + !                      \ ds.r_sector = sector
+1 lit over 28 lit + !                \ ds.r_type   = 1 (write)
+nslot over 34 lit + !
+rbase clrd whdr wd0 wd1 wd2 subq
+dup 34 lit + @
+;
+
+\ vread ( ds sector buf -- ds id )  submit a READ (type 0) of one sector; no wait.
+: vread
+2 lit pick 30 lit + !                \ ds.r_buf    = buf
+over 2C lit + !                      \ ds.r_sector = sector
+0 lit over 28 lit + !                \ ds.r_type   = 0 (read)
+nslot over 34 lit + !
+rbase clrd whdr wd0 wd1 wd2 subq
+dup 34 lit + @
+;
+
+\ vwait ( ds id -- ds id )  BLOCKING: pump vpoll until done[id] == 1.  Built on the
+\ non-blocking primitives — the node's standalone disk-save loop uses it; the unified
+\ serve/event loop (Stage 2) drives vpoll itself and checks vstat instead.
+: vwait
+begin
+  swap vpoll swap                    \ vpoll(ds), keep id
+  over over 4 lit * + 14 lit + @     \ done[id] = ds + id*4 + 0x14
+until
+;
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Tests (./tools/fam --test src/disk.fam).  No real device: drive the LOGIC on a
+\ fake state block — a heap ds, a fake qb (memory we read/write as if it were the
+\ queue), a fake dev (scratch absorbing QueueNotify / supplying DeviceFeatures).
+\ We hand-set the used-ring index to drive completion edges, exactly like the old
+\ single-slot suite did.  The real device path is covered by tests/node_disk_dev.fam.
+\ ──────────────────────────────────────────────────────────────────────────────
+Test {
+\ nslot hands out 0,1,2,3,4 then wraps back to 0.
+slot_rot {
+40 lit alloc                         \ ( ds )
+0 lit over 10 lit + !                \ next = 0
+dup nslot swap drop 0 lit asrt_eq    \ -> 0   (nslot returns ( ds id ); keep id)
+}
+\ nslot wraps: starting at next=4 yields 4 then sets next back to 0.
+slot_wrap {
+40 lit alloc
+4 lit over 10 lit + !                \ next = 4
+dup nslot drop                       \ id 4 ; ( ds )
+10 lit + @ 0 lit asrt_eq             \ next wrapped to 0
+}
+\ vreq builds slot 0's 3-descriptor chain + header for a WRITE (type 1).
+req_wr {
+40 lit alloc                         \ ( ds )
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ qb (page-aligned)
+100 lit alloc over !                 \ dev (scratch for QueueNotify)
+0 lit over 8 lit + !                 \ subd 0
+0 lit over 10 lit + !                \ next 0
+1 lit 9 lit 40000000 lit            \ ( ds type=1 sector=9 buf )
+vreq                                 \ ( ds id )
+0 lit asrt_eq                        \ slot id == 0
+\ header at qb+0x2000
+dup 4 lit + @ 2000 lit + @ 1 lit asrt_eq        \ type = write(1)
+dup 4 lit + @ 2008 lit + @ 9 lit asrt_eq        \ sector = 9
+dup 4 lit + @ 2010 lit + c@ FF lit asrt_eq      \ status armed = FF
+\ desc[0] (header) at qb+0, desc[1] (data) at qb+0x10
+dup 4 lit + @ 0 lit + @ over 4 lit + @ 2000 lit + asrt_eq   \ desc0.addr = r_h
+dup 4 lit + @ 8 lit + @ 10 lit asrt_eq          \ desc0.len  = 16
+dup 4 lit + @ E lit + h@ 1 lit asrt_eq          \ desc0.next = id*3+1 = 1
+dup 4 lit + @ 10 lit + @ 40000000 lit asrt_eq   \ desc1.addr = buf
+dup 4 lit + @ 18 lit + @ 200 lit asrt_eq        \ desc1.len  = 512
+dup 4 lit + @ 1C lit + h@ 1 lit asrt_eq         \ desc1.flags = NEXT (write: device reads)
+\ avail ring published head 0, idx 1; subd advanced
+dup 4 lit + @ 104 lit + h@ 0 lit asrt_eq        \ avail.ring[0] = head 0
+dup 4 lit + @ 102 lit + h@ 1 lit asrt_eq        \ avail.idx = 1
+8 lit + @ 1 lit asrt_eq                          \ subd = 1   ( consumes ds )
+}
+\ A READ (type 0) flips desc[1] to device-WRITES (flags NEXT|WRITE = 3).
+req_rd {
+40 lit alloc
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+100 lit alloc over !
+0 lit over 8 lit + !
+0 lit over 10 lit + !
+0 lit B lit 40000000 lit            \ type=0 (read) sector=11 buf
+vreq drop                            \ ( ds )
+dup 4 lit + @ 2000 lit + @ 0 lit asrt_eq        \ type = read(0)
+4 lit + @ 1C lit + h@ 3 lit asrt_eq             \ desc1.flags = NEXT|WRITE (device writes)
+}
+\ vpoll reaps a completion the device posted (used.ring[0].id = 0 -> slot 0) into done[].
+poll_reap {
+40 lit alloc
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+0 lit over C lit + !                 \ usd 0
+\ device side: used.ring[0].id = 0 (head of slot 0), used.idx = 1
+dup 4 lit + @ 1004 lit + 0 lit swap !            \ used.ring[0].id = 0
+dup 4 lit + @ 1002 lit + 1 lit swap h!           \ used.idx = 1
+vpoll
+dup C lit + @ 1 lit asrt_eq          \ usd advanced to 1
+dup 0 lit vstat swap drop 1 lit asrt_eq          \ done[0] = 1
+14 lit + @ 1 lit asrt_eq             \ done[0] word set  ( consumes ds )
+}
+\ vpoll on an empty used ring (idx == cursor) is a no-op.
+poll_empty {
+40 lit alloc
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+3 lit over C lit + !                 \ usd 3
+dup 4 lit + @ 1002 lit + 3 lit swap h!           \ used.idx = 3 == usd -> nothing
+vpoll
+C lit + @ 3 lit asrt_eq              \ usd unchanged  ( consumes ds )
+}
+\ vstat is a pure read of done[id].
+stat_rd {
+40 lit alloc
+1 lit over 1C lit + !                \ done[2] (ds+0x14 + 2*4 = ds+0x1C) = 1
+dup 2 lit vstat swap drop 1 lit asrt_eq          \ done[2] reads 1
+1 lit vstat 0 lit asrt_eq            \ done[1] reads 0   ( consumes ds )
+}
+\ vflush, writeback (device offers FLUSH): builds a type-4 no-data 2-descriptor chain.
+flush_wb {
+40 lit alloc
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+100 lit alloc over !
+200 lit over @ 10 lit + !            \ dev DeviceFeatures = FLUSH offered (writeback)
+0 lit over 8 lit + !
+0 lit over 10 lit + !
+vflush                               \ ( ds id )
+0 lit asrt_eq                        \ used slot 0
+dup 4 lit + @ 2000 lit + @ 4 lit asrt_eq        \ header type = flush(4)
+dup 4 lit + @ 8 lit + @ 10 lit asrt_eq          \ desc0.len  = 16 (header)
+dup 4 lit + @ E lit + h@ 1 lit asrt_eq          \ desc0.next = 1 -> status
+dup 4 lit + @ 18 lit + @ 1 lit asrt_eq          \ desc1.len  = 1 (status byte)
+4 lit + @ 1C lit + h@ 2 lit asrt_eq             \ desc1.flags = WRITE (no NEXT)
+}
+\ vwrite is vreq with type implied 1 and a node-friendly arg order.
+req_vw {
+40 lit alloc
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+100 lit alloc over !
+0 lit over 8 lit + !
+0 lit over 10 lit + !
+3 lit 40000000 lit                   \ ( ds sector=3 buf )
+vwrite                               \ ( ds id )
+0 lit asrt_eq                        \ slot 0
+dup 4 lit + @ 2000 lit + @ 1 lit asrt_eq         \ type = write(1)
+dup 4 lit + @ 2008 lit + @ 3 lit asrt_eq         \ sector = 3
+4 lit + @ 10 lit + @ 40000000 lit asrt_eq        \ desc1.addr = buf  ( consumes ds )
+}
+\ vwait returns at once when the slot is already done (must not spin forever).
+wait_done {
+40 lit alloc
+1 lit over 1C lit + !                \ done[2] = 1 (ds+0x14 + 2*4)
+2 lit vwait                          \ ( ds 2 )  must return immediately
+2 lit asrt_eq                        \ id preserved
+14 lit + @ 0 lit asrt_eq             \ done[0] untouched  ( consumes ds )
+}
+\ vflush, writethrough (no FLUSH offered): a no-op returning the -1 sentinel.
+flush_wt {
+40 lit alloc
+100 lit alloc over !
+0 lit over @ 10 lit + !              \ DeviceFeatures = 0 (no FLUSH)
+0 lit over 8 lit + !
+0 lit over 10 lit + !
+vflush                               \ ( ds id )
+FFFFFFFF lit asrt_eq                 \ sentinel: writethrough, nothing to flush
+8 lit + @ 0 lit asrt_eq              \ subd untouched (nothing submitted)  ( consumes ds )
+}
+}

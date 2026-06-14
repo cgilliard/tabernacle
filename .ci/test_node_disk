@@ -10,16 +10,16 @@ exec </dev/null
 setup_qemu
 build_fam
 
-echo "--- 1) node_disk.fam unit tests (no device, pure logic) ---"
-out=$(./tools/fam --test src/node_disk.fam 2>&1) || { echo "$out"; echo "FAIL: unit tests exited non-zero"; exit 1; }
+echo "--- 1) disk.fam unit tests (no device, pure logic) ---"
+out=$(./tools/fam --test src/fence.fam src/disk.fam 2>&1) || { echo "$out"; echo "FAIL: unit tests exited non-zero"; exit 1; }
 echo "$out"
 echo "$out" | grep -qE '[1-9][0-9]* passed' || { echo "FAIL: no unit tests ran (silent compile failure?)"; exit 1; }
 
-echo "--- 2) node_disk REAL virtio-blk device test (--disk) ---"
+echo "--- 2) disk.fam REAL virtio-blk device test (--disk) ---"
 DISK=$(mktemp)
-dd if=/dev/zero of="$DISK" bs=512 count=8 2>/dev/null   # fresh, zeroed
+dd if=/dev/zero of="$DISK" bs=512 count=16 2>/dev/null   # fresh, zeroed
 # timeout guards against a handshake regression that would hang the poll loop.
-out=$(timeout 60 ./tools/fam --test --disk="$DISK" src/node_disk.fam tests/node_disk_dev.fam 2>&1) \
+out=$(timeout 60 ./tools/fam --test --disk="$DISK" src/fence.fam src/disk.fam tests/node_disk_dev.fam 2>&1) \
     || { echo "$out"; echo "FAIL: device test exited non-zero (or timed out)"; rm -f "$DISK"; exit 1; }
 echo "$out"
 echo "$out" | grep -q 'realwr' || { echo "FAIL: realwr device test did not run"; rm -f "$DISK"; exit 1; }

@@ -2,3 +2,4 @@
 bin/*
 tmp/*
 data/*
+tools/__pycache__/*
