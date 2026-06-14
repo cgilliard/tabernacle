@@ -1,0 +1,105 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ tests/node_disk_trie_dev.fam — REAL virtio-blk tests of the COW trie
+\ (src/node_disk_trie.fam): single-bucket round-trip and a bucket split + multi-
+\ level descent, all on 32-byte keys / 8-byte values.  Needs a disk; run as:
+\   ./tools/fam --test --disk=d.img src/node_disk.fam src/node_disk_store.fam \
+\               src/node_disk_trie.fam tests/node_disk_trie_dev.fam
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ Test helpers for the trie (32-byte keys / 8-byte values).  Reusable buffers: keys
+\ are 32-byte buffers distinguished only by word 0 (rest stays the fresh-alloc zero),
+\ values are 8-byte buffers.  tput/tget take a small int key + value for brevity.
+: _kbuf variable ;
+: _vbuf variable ;
+: _obuf variable ;
+: tbuf 20 lit alloc _kbuf !  8 lit alloc _vbuf !  8 lit alloc _obuf ! ;
+: tput  ( keyval value -- )    \ trie put
+_vbuf @ !  _kbuf @ !
+_kbuf @ _vbuf @ tr_put ;
+: tget  ( keyval -- value|0 )  \ trie get (0 = not found; test values are nonzero)
+_kbuf @ !  0 lit _obuf @ !
+_kbuf @ _obuf @ tr_get if _obuf @ @ else 0 lit then ;
+
+Test {
+\ COW trie (single-bucket): put/update/get, commit + reboot persists, rollback of
+\ a put leaves the committed keys intact.
+trie_rt {
+1C lit alloc                              \ ( dst )
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+find_blk over !
+0 lit over 14 lit + !
+vblkinit                                  \ ( dst )
+\ the device tests share one scratch disk; zero the meta pages so this test starts
+\ from genesis rather than an earlier test's committed meta.
+200 lit alloc dup mt_z                     \ ( dst zbuf )
+2dup 0 lit mt_wr                          \ zero meta page 0 ; ( dst zbuf )
+2dup 1 lit mt_wr                          \ zero meta page 1 ; ( dst zbuf )
+drop                                      \ ( dst )
+8 lit tr_init                             \ genesis, 8-frame pool ; ( )
+tbuf                                      \ allocate the test key/value buffers
+AAAA lit tget 0 lit asrt_eq               \ empty trie -> miss
+\ --- a transaction of puts (each COWs the bucket) ---
+tx_begin
+11 lit 111 lit tput
+22 lit 222 lit tput
+33 lit 333 lit tput
+11 lit tget 111 lit asrt_eq               \ visible within the txn
+22 lit tget 222 lit asrt_eq
+33 lit tget 333 lit asrt_eq
+22 lit 999 lit tput                        \ update an existing key
+22 lit tget 999 lit asrt_eq
+44 lit tget 0 lit asrt_eq                 \ missing key -> 0
+commit
+\ --- reboot: keys + the update persist (read from disk) ---
+_eng_bp @ @ 8 lit tr_init
+11 lit tget 111 lit asrt_eq
+22 lit tget 999 lit asrt_eq
+33 lit tget 333 lit asrt_eq
+44 lit tget 0 lit asrt_eq
+\ --- rollback: an aborted put must not persist ---
+tx_begin
+55 lit 555 lit tput
+55 lit tget 555 lit asrt_eq               \ visible inside the txn
+rollback
+55 lit tget 0 lit asrt_eq                 \ gone after rollback
+11 lit tget 111 lit asrt_eq               \ committed keys intact
+}
+\ Bucket split + multi-level descent: insert past CAP (4) to split the root bucket
+\ into an internal node, then confirm every key is still findable, inserts descend
+\ into child buckets, an update descends + COWs the path, and it all survives a
+\ commit + reboot.
+trie_split {
+1C lit alloc
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+find_blk over !
+0 lit over 14 lit + !
+vblkinit                                  \ ( dst )
+200 lit alloc dup mt_z 2dup 0 lit mt_wr 2dup 1 lit mt_wr drop   \ genesis ; ( dst )
+10 lit tr_init                            \ 16-frame pool ; ( )
+tbuf
+tx_begin
+1 lit 10 lit tput
+2 lit 20 lit tput
+3 lit 30 lit tput
+4 lit 40 lit tput                          \ root bucket now full (CAP=4)
+5 lit 50 lit tput                          \ 5th key -> root bucket SPLITS into an internal node
+1 lit tget 10 lit asrt_eq                 \ all five still findable (now via descent)
+2 lit tget 20 lit asrt_eq
+3 lit tget 30 lit asrt_eq
+4 lit tget 40 lit asrt_eq
+5 lit tget 50 lit asrt_eq
+6 lit 60 lit tput                          \ further inserts descend into child buckets
+7 lit 70 lit tput
+6 lit tget 60 lit asrt_eq
+7 lit tget 70 lit asrt_eq
+3 lit 99 lit tput                          \ update through the internal node (COW the path)
+3 lit tget 99 lit asrt_eq
+commit
+_eng_bp @ @ 10 lit tr_init                \ reboot: re-read the multi-level trie from disk
+1 lit tget 10 lit asrt_eq
+5 lit tget 50 lit asrt_eq
+7 lit tget 70 lit asrt_eq
+3 lit tget 99 lit asrt_eq
+8 lit tget 0 lit asrt_eq                  \ a never-inserted key -> 0
+}
+}
