@@ -1,0 +1,26 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ src/full_node.fam — full node entry point.
+\
+\ The overall node program.  Today it brings up the BIN0/UDP chunk server module
+\ (a running node seeds its own binary to peers, replacing tools/server.py); future
+\ node behaviour (consensus, ledger, prover) hangs off this same entry.
+\
+\ Build order: lib/stdlib.fam  src/node_serve.fam  src/full_node.fam  (this file
+\ last, so the module's words are defined).  We capture tabernacle's handoff args
+\ (a2 = bind port, a3 = debug flag, a4 = img_base) at top level — before any
+\ : word call can clobber a0-a4 — then hand them to the server module.
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ Relocate the ENTIRE fam runtime above the loaded image, then serve it in place.
+\ init (stdlib) normally puts gp = img_base + code_size, then lays the RID stack
+\ (pushed by every :word call), the variable region, the heap and the data stack
+\ starting there -- right past the code, INSIDE the appended bible -- so they would
+\ corrupt served chunks.  Set gp to the END of the image (img_base + img_size) and
+\ re-run init so all of that lands ABOVE the image; the image then stays pristine
+\ and we point the TX descriptors straight at it (no snapshot copy).
+\ This MUST run before any :word call (the first RID push).
+8322C7FD ,   \ lw  t0, -36(a4)   ( t0 = img_size, the bin_size config at img_base-36 )
+B3015700 ,   \ add gp, a4, t0    ( gp = img_base + img_size = first byte past the image )
+init         \ relay RID stack / vars / heap / data stack ABOVE the image
+
+_a1 _a2 _a3 _a4 runsrv
