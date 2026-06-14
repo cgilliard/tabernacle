@@ -1,0 +1,62 @@
+name: CI
+
+# Each proof runs as its own matrix job (parallel runners), on amd64 and arm64.
+# Every job builds the fam chain from committed sources, then runs ONE proof, so
+# a failure points at exactly one property on one binary. No continue-on-error:
+# every job gates the merge.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+  pull_request:
+    branches:
+      - '*'
+  schedule:
+    - cron: '15 7 * * *'  # nightly 07:15 UTC
+  workflow_dispatch:
+
+jobs:
+  proofs:
+    name: ${{ matrix.config.platform }} - ${{ matrix.task }}
+    runs-on: ${{ matrix.config.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - platform: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+        task:
+          - selftest_fsm        # verify_fsm proves crafted jalr/mul/ecall/oob/RVC are REJECTED
+          - selftest_wx         # verify_wx  proves crafted code/loaded store-bases are REJECTED
+          - selftest_cfi        # verify_cfi proves load/jal-into-root and bad s11-adjust are REJECTED
+          - selftest_region     # verify_region proves TOP-base store REJECTED + region layouts disjoint
+          - selftest_handoff    # verify_handoff proves ungated jump-to-payload + empty image are REJECTED
+          - proof_fam0          # P1/P2 + W^X + CFI on the bootstrap seed
+          - proof_fam           # P1/P2 + W^X (modulo imm_tramp) + CFI on the compiler
+          - proof_fampack       # P1/P2 on the self-extracting packer
+          - proof_packed        # compositional proof of the shipped bin/fam (clean stub + image P1/P2/P3)
+          - proof_cover         # P1/P2 on the stdlib-coverage output + runtime self-check + overflow aborts
+          - proof_region        # L1 disjoint layout + L2 store confinement (gates fam0; reports fam/cover)
+          - proof_tabernacle    # tabernacle T2: P1/P2(handoff) + P5a hash-gate + packed + bin_size-invariance + L1/L2 (219/226) + P3 W^X + P4 CFI + D1 DMA + D2 quiesce, all gated
+          - test_node_disk      # virtio-blk disk-write path: (1) dsk_sub/dsk_poll state-machine logic on a fake queue, (2) a REAL device test (fam --test --disk=) that writes a ramp + cmp's the bytes on disk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Show host info
+        run: |
+          uname -a
+          python3 --version
+
+      - name: ${{ matrix.task }}
+        run: ./.ci/${{ matrix.task }}
+        env:
+          PLATFORM: ${{ matrix.config.platform }}
