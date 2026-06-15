@@ -89,4 +89,6 @@ if [ -n "$DISK" ]; then
 	ARGS="$ARGS -device virtio-blk-device,drive=d0"
 fi
 
-qemu-system-riscv32 $ARGS 2>/dev/null
+# exec so signals (and `timeout`) reach qemu directly and `$!` is the qemu pid
+# (no orphaned qemu on kill/timeout — qemu is the direct child, not a grandchild).
+exec qemu-system-riscv32 $ARGS 2>/dev/null
