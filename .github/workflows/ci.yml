@@ -49,6 +49,7 @@ jobs:
           - test_net            # net.fam primitive logic: ip_csum / rx_poll / rx_done / tx_post / tx_post2 / tx_busy
           - test_babybear       # BabyBear field: rv32i mul-free path (21) + rv32im fmul_i == fmul_im cross-check (30)
           - test_poseidon2      # Poseidon2-BabyBear-16: pos2_i KAT on rv32i + pos2_im KAT on rv32im (== pos2_i)
+          - test_wotsp          # WOTS+ over Poseidon2-BabyBear-16: keygen/sign/verify round-trip + tamper reject (rv32i + rv32im)
     steps:
       - name: Checkout
         uses: actions/checkout@v5
