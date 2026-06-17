@@ -1,7 +1,7 @@
-\ ── src/poseidon2_im.fam — Poseidon2 prover path (rv32im, inlines fmul_im).
-\ Reuses ext + sponge helpers (zero16/addblk/finblk/squee) from src/poseidon2.fam. Build AFTER it.
+\ ── src/poseidon2_im.fam — Poseidon2 prover path (rv32im, fmul_im).
+\ Reuses ext + sponge helpers from poseidon2.fam. p2hashim takes caller scratch h (no alloc).
 
-\ ── intl_im ( s w -- s w ) ──
+\ ── intl_im ──
 : intl_im
   over @  2 lit pick 4 lit + @ fadd  2 lit pick 8 lit + @ fadd  2 lit pick C lit + @ fadd  2 lit pick 10 lit + @ fadd  2 lit pick 14 lit + @ fadd  2 lit pick 18 lit + @ fadd  2 lit pick 1C lit + @ fadd  2 lit pick 20 lit + @ fadd  2 lit pick 24 lit + @ fadd  2 lit pick 28 lit + @ fadd  2 lit pick 2C lit + @ fadd  2 lit pick 30 lit + @ fadd  2 lit pick 34 lit + @ fadd  2 lit pick 38 lit + @ fadd  2 lit pick 3C lit + @ fadd
   2 lit pick 0 lit + @ 0A632D93 lit fmul_im  1 lit pick fadd  3 lit pick 0 lit + !
@@ -23,7 +23,7 @@
   drop
 ;
 
-\ ── sboxa_im ( s w -- s w ) ──
+\ ── sboxa_im ──
 : sboxa_im
   over 0 lit + @ fpow7im  2 lit pick 0 lit + !
   over 4 lit + @ fpow7im  2 lit pick 4 lit + !
@@ -43,7 +43,7 @@
   over 3C lit + @ fpow7im  2 lit pick 3C lit + !
 ;
 
-\ ── pos2_im ( s w -- s w )  full permutation, prover path ──
+\ ── pos2_im ( s w -- s w ) ──
 : pos2_im
   ext
   over 0 lit + @ 61E097F6 lit fadd  2 lit pick 0 lit + !
@@ -210,10 +210,9 @@
   sboxa_im ext
 ;
 
-\ ── prover sponge (reuses zero16/addblk/finblk/squee from poseidon2.fam) ──
 : permh_im   dup 14 lit + over 54 lit + pos2_im 2drop ;
-: p2hashim
-A0 lit alloc  tuck 8 lit + !  tuck 4 lit + !  tuck !
+: p2hashim  \ ( in n out h -- )
+tuck 8 lit + !  tuck 4 lit + !  tuck !
 dup 14 lit + zero16
 0 lit over C lit + !
 begin  dup C lit + @ 8 lit +  over 4 lit + @ u> invert
@@ -299,7 +298,7 @@ over 3C lit + @ 1C76D01A lit asrt_eq
 spi_empty {
 20 lit alloc
 4 lit alloc
-0 lit 2 lit pick p2hashim
+0 lit 2 lit pick A0 lit alloc p2hashim
 dup 0 lit + @ 207FB9A9 lit asrt_eq
 dup 4 lit + @ 01D1CA71 lit asrt_eq
 dup 8 lit + @ 4376B3FC lit asrt_eq
@@ -314,7 +313,7 @@ spi_one {
 20 lit alloc
 4 lit alloc
 5 lit over 0 lit + !
-1 lit 2 lit pick p2hashim
+1 lit 2 lit pick A0 lit alloc p2hashim
 dup 0 lit + @ 1B25FA77 lit asrt_eq
 dup 4 lit + @ 53E6260F lit asrt_eq
 dup 8 lit + @ 4AE86474 lit asrt_eq
@@ -337,7 +336,7 @@ spi_nine {
 6 lit over 18 lit + !
 7 lit over 1C lit + !
 8 lit over 20 lit + !
-9 lit 2 lit pick p2hashim
+9 lit 2 lit pick A0 lit alloc p2hashim
 dup 0 lit + @ 569C08CD lit asrt_eq
 dup 4 lit + @ 193C1535 lit asrt_eq
 dup 8 lit + @ 69691AA9 lit asrt_eq
@@ -368,7 +367,7 @@ D lit over 34 lit + !
 E lit over 38 lit + !
 F lit over 3C lit + !
 10 lit over 40 lit + !
-11 lit 2 lit pick p2hashim
+11 lit 2 lit pick A0 lit alloc p2hashim
 dup 0 lit + @ 25431CB2 lit asrt_eq
 dup 4 lit + @ 06247C1F lit asrt_eq
 dup 8 lit + @ 0F200E01 lit asrt_eq

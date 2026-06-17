@@ -83,6 +83,7 @@ run bin/full_node.bin \
 	src/fence.fam \
 	src/babybear.fam \
 	src/babybear_im.fam \
+	src/poseidon2.fam \
 	src/disk.fam \
 	src/net.fam \
 	src/node_serve.fam \
