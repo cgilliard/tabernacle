@@ -21,8 +21,43 @@ B3035302 ,   \ mul   t2,t1,t0      t2 = lo = a*b
 2320C101 ,   \ sw    t3,0(sp)      hi -> sp+0
 ;
 
-\ fmul_im ( a b -- a*b mod p )  reuses the mul-free reduce64 from babybear.fam.
-:M fmul_im  umul64im reduce64 ;
+\ ──────────────────────────────────────────────────────────────────────────────
+\ red64im ( lo hi -- r )  Barrett reduction mod p=0x78000001 (mu=0x88888887).  [<=8ch name]
+\ Hardware-mul reduction for the prover — replaces the shared 335-instr mul-free
+\ reduce64 with 24 instructions, keeping STANDARD form so fmul_im == fmul_i exactly.
+\ Algorithm (verified <2p pre-correction over worst cases -> 2 conditional subs):
+\   q1 = x>>30 ; q3 = (q1*mu)>>32 = mulhu ; r = lo - q3*p ; sub p while r>=p (x2).
+\ Clobbers t0..t5 only (no s-regs). NOTE no `,;` in comments (ends a :M macro).
+\ ──────────────────────────────────────────────────────────────────────────────
+:M red64im
+03230100 ,   \ lw    t1,0(sp)     hi
+83224100 ,   \ lw    t0,4(sp)     lo
+93132300 ,   \ slli  t2,t1,2      hi<<2
+13DEE201 ,   \ srli  t3,t0,30     lo>>30
+B3E3C301 ,   \ or    t2,t2,t3     q1 = (hi<<2)or(lo>>30)
+379F8888 ,   \ lui   t5,0x88889
+130F7F88 ,   \ addi  t5,t5,-1913  t5 = mu = 0x88888887
+33BEE303 ,   \ mulhu t3,t2,t5     q3 = (q1*mu)>>32
+B70E0078 ,   \ lui   t4,0x78000
+938E1E00 ,   \ addi  t4,t4,1      t4 = p = 0x78000001
+330EDE03 ,   \ mul   t3,t3,t4     q3*p low 32
+B382C241 ,   \ sub   t0,t0,t3     r = lo - q3*p
+B383D241 ,   \ sub   t2,t0,t4     rp = r - p
+33BED201 ,   \ sltu  t3,t0,t4     b = r below p
+330EC041 ,   \ sub   t3,zero,t3   mask = -b
+33FECE01 ,   \ and   t3,t4,t3     p and mask
+B382C301 ,   \ add   t0,t2,t3     r = r>=p ? r-p : r
+B383D241 ,   \ sub   t2,t0,t4     rp = r - p
+33BED201 ,   \ sltu  t3,t0,t4     b = r below p
+330EC041 ,   \ sub   t3,zero,t3   mask = -b
+33FECE01 ,   \ and   t3,t4,t3     p and mask
+B382C301 ,   \ add   t0,t2,t3     r = r>=p ? r-p : r
+23225100 ,   \ sw    t0,4(sp)     store r
+13014100 ,   \ addi  sp,sp,4      pop hi -- result r at new sp+0
+;
+
+\ fmul_im ( a b -- a*b mod p )  hardware multiply + Barrett reduction (prover path).
+:M fmul_im  umul64im red64im ;
 
 \ fsqr_im / fpow7im ( a -- a^2 / a^7 )  hardware-mul S-box helpers (prover path).
 :M fsqr_im   dup fmul_im ;
@@ -44,4 +79,9 @@ xchk0 { 12345678 lit 76543210 lit fmul_im  12345678 lit 76543210 lit fmul_i asrt
 xchk1 { 77FFFFFF lit 77FFFFFF lit fmul_im  77FFFFFF lit 77FFFFFF lit fmul_i asrt_eq }
 xchk2 { 075BCD15 lit 12345678 lit fmul_im  075BCD15 lit 12345678 lit fmul_i asrt_eq }
 xchk3 { 1 lit 77FFFFFF lit fmul_im  1 lit 77FFFFFF lit fmul_i asrt_eq }
+\ Barrett boundary cross-checks (values that exercise the 2 conditional subtracts).
+bar0 { 78000000 lit 78000000 lit fmul_im  1 lit asrt_eq }                              \ (p-1)^2 = 1
+bar1 { 77FFFFFF lit 77FFFFFE lit fmul_im  77FFFFFF lit 77FFFFFE lit fmul_i asrt_eq }
+bar2 { 3C000001 lit 3C000001 lit fmul_im  3C000001 lit 3C000001 lit fmul_i asrt_eq }
+bar3 { 6DB657B7 lit 0A632D94 lit fmul_im  6DB657B7 lit 0A632D94 lit fmul_i asrt_eq }   \ DIAG vals
 }
