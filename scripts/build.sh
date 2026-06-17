@@ -85,6 +85,7 @@ run bin/full_node.bin \
 	src/babybear_im.fam \
 	src/poseidon2.fam \
 	src/wotsp.fam \
+	src/tx.fam \
 	src/disk.fam \
 	src/net.fam \
 	src/node_serve.fam \

@@ -1,0 +1,136 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ src/tx.fam — Transactions over WOTS+ + Poseidon2-BabyBear-16.
+\ MAGIC=0x534E5854 ("TXNS") VERSION=1. amount u64 -> [lo=amt&0x7FFFFFFF, hi=amt>>31].
+\ body_hash = p2hash over [magic,version,n_in,n_out | per-output (pkhash8,amt2) |
+\   per-input (pkhash8,amt2)]. commitment = p2hash([pkhash8, amt2]). Inputs bind by
+\   pkhash = wpkhash(pubkey); sigs verify under pkhash over body_hash.
+\ STACK RULE: when t is alone on top use `dup` to read a field; `over` only when t is NOS.
+\ Context t (caller-allocated): fam literals HEX. NO alloc-per-call.
+\   +00 n_in  +04 n_out  +08 outs  +0C ins  +10 sigs  +14 bh  +18 fld  +1C h
+\   +20 inpkh +24 vdig   +28 vtops
+\   outs : n_out x 10 words [pkhash(8), amt_lo, amt_hi]
+\   ins  : n_in  x 538 words [pubkey(536), amt_lo, amt_hi]
+\   sigs : n_in  x 536 words      inpkh: n_in x 10 words (computed input openings)
+\   fld  : >= 4+10*(nin+nout) w   h: >=0xA0   vdig>=67w  vtops>=536w
+\ ──────────────────────────────────────────────────────────────────────────────
+
+: cpN  ( src dst n -- )  0 lit do  over i 4 lit * + @  over i 4 lit * + !  loop  2drop ;
+
+: txcommit  ( pkh alo ahi out fld h -- )   \ out = p2hash([pkh(8), alo, ahi])
+  5 lit pick 2 lit pick 8 lit cpN
+  4 lit pick 2 lit pick 20 lit + !
+  3 lit pick 2 lit pick 24 lit + !
+  1 lit pick A lit 4 lit pick 3 lit pick p2hash
+  2drop 2drop 2drop ;
+
+: txinpkh  ( t -- )   \ compute each input's [pkhash(8), amt] opening into inpkh
+  dup @ 0 lit > if
+    dup @ 0 lit do
+      dup C lit + @ i 868 lit * +   over 20 lit + @ i 28 lit * +   2 lit pick 1C lit + @   wpkhash
+      dup C lit + @ i 868 lit * + 860 lit + @   over 20 lit + @ i 28 lit * + 20 lit + !
+      dup C lit + @ i 868 lit * + 864 lit + @   over 20 lit + @ i 28 lit * + 24 lit + !
+    loop
+  then drop ;
+
+: txbody  ( t -- )   \ body_hash -> bh  (requires txinpkh first)
+  534E5854 lit  over 18 lit + @ !
+  1 lit          over 18 lit + @ 4 lit + !
+  dup @          over 18 lit + @ 8 lit + !
+  dup 4 lit + @  over 18 lit + @ C lit + !
+  dup 4 lit + @ 0 lit > if
+    dup 4 lit + @ 0 lit do
+      dup 8 lit + @ i 28 lit * +
+      over 18 lit + @ 10 lit + i 28 lit * +
+      A lit cpN
+    loop
+  then
+  dup @ 0 lit > if
+    dup @ 0 lit do
+      dup 20 lit + @ i 28 lit * +
+      over 18 lit + @ 10 lit + 2 lit pick 4 lit + @ 28 lit * + i 28 lit * +
+      A lit cpN
+    loop
+  then
+  dup 18 lit + @  1 lit pick @  2 lit pick 4 lit + @ + A lit * 4 lit +  2 lit pick 14 lit + @  3 lit pick 1C lit + @  p2hash
+  drop ;
+
+: txvalid  ( t -- f )   \ recompute body_hash + verify each input signature
+  dup txinpkh
+  dup txbody
+  1 lit
+  over @ 0 lit > if
+    over @ 0 lit do
+      1 lit pick 20 lit + @ i 28 lit * +
+      2 lit pick 10 lit + @ i 860 lit * +
+      3 lit pick 14 lit + @
+      4 lit pick 1C lit + @
+      5 lit pick 24 lit + @
+      6 lit pick 28 lit + @
+      wverify and
+    loop
+  then nip ;
+
+Test {
+tx1 {
+20 lit alloc
+1 lit over 0 lit + !
+2 lit over 4 lit + !
+3 lit over 8 lit + !
+4 lit over C lit + !
+5 lit over 10 lit + !
+6 lit over 14 lit + !
+7 lit over 18 lit + !
+8 lit over 1C lit + !
+860 lit alloc
+34 lit alloc
+1 lit over !  1 lit over 4 lit + !
+28 lit alloc over 8 lit + !
+868 lit alloc over C lit + !
+860 lit alloc over 10 lit + !
+20 lit alloc over 14 lit + !
+80 lit alloc over 18 lit + !
+A0 lit alloc over 1C lit + !
+28 lit alloc over 20 lit + !
+110 lit alloc over 24 lit + !
+860 lit alloc over 28 lit + !
+2 lit pick 2 lit pick 2 lit pick 1C lit + @ wkeysk
+43 lit 0 lit do  1 lit pick i 20 lit * +  1 lit pick C lit + @ i 20 lit * +  F lit  3 lit pick 1C lit + @  wchain  loop
+dup C lit + @  64 lit over 860 lit + !  0 lit over 864 lit + !  drop
+dup 8 lit + @
+11111111 lit over 0 lit + !
+22222222 lit over 4 lit + !
+33333333 lit over 8 lit + !
+44444444 lit over C lit + !
+55555555 lit over 10 lit + !
+66666666 lit over 14 lit + !
+77777777 lit over 18 lit + !
+10101010 lit over 1C lit + !
+50 lit over 20 lit + !  0 lit over 24 lit + !  drop
+dup txinpkh  dup txbody
+dup 14 lit + @
+dup 0 lit + @ 43065621 lit asrt_eq
+dup 4 lit + @ 55B14B1C lit asrt_eq
+dup 8 lit + @ 1B5DC261 lit asrt_eq
+dup C lit + @ 1C3B1CA9 lit asrt_eq
+dup 10 lit + @ 4DECD8F4 lit asrt_eq
+dup 14 lit + @ 755F4A60 lit asrt_eq
+dup 18 lit + @ 5DEDE087 lit asrt_eq
+dup 1C lit + @ 44279A20 lit asrt_eq
+drop
+dup 14 lit + @  2 lit pick  2 lit pick 10 lit + @  3 lit pick 1C lit + @  4 lit pick 24 lit + @  wsign
+dup txvalid 1 lit asrt_eq
+dup 8 lit + @  50 lit  0 lit  3 lit pick 28 lit + @  4 lit pick 18 lit + @  5 lit pick 1C lit + @  txcommit
+dup 28 lit + @
+dup 0 lit + @ 115A22B8 lit asrt_eq
+dup 4 lit + @ 24DA2393 lit asrt_eq
+dup 8 lit + @ 2145CCD6 lit asrt_eq
+dup C lit + @ 09D14720 lit asrt_eq
+dup 10 lit + @ 7451FDF7 lit asrt_eq
+dup 14 lit + @ 1864A6B2 lit asrt_eq
+dup 18 lit + @ 5F71B3DE lit asrt_eq
+dup 1C lit + @ 0CD58801 lit asrt_eq
+drop
+dup 10 lit + @ dup @ 1 lit + over ! drop
+dup txvalid 0 lit asrt_eq
+2drop drop }
+}
