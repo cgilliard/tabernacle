@@ -1,0 +1,43 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ src/babybear_im.fam — BabyBear multiply for rv32im (uses `mul`/`mulhu`).
+\
+\ Companion to src/babybear.fam (compiled AFTER it: reuses `reduce64`).  This is the
+\ ONLY field file that emits M-extension opcodes, so the rv32i verifier omits it and
+\ stays verify_fsm-clean; the rv32im prover includes it for the fast multiply.
+\
+\   umul64im ( a b -- lo hi )   64-bit product via `mul` (lo) + `mulhu` (hi)
+\   fmul_im   ( a b -- a*b mod p )
+\
+\ Data-stack layout in a `:` word body (like stdlib `*`): sp+0 = top arg, sp+4 = next.
+\ ( a b -- lo hi ): in  b@sp+0 a@sp+4 ; out  hi@sp+0 lo@sp+4 (hi is the top result).
+\ ──────────────────────────────────────────────────────────────────────────────
+
+:M umul64im
+83220100 ,   \ lw    t0,0(sp)      t0 = b
+03234100 ,   \ lw    t1,4(sp)      t1 = a
+B3035302 ,   \ mul   t2,t1,t0      t2 = lo = a*b
+333E5302 ,   \ mulhu t3,t1,t0      t3 = hi
+23227100 ,   \ sw    t2,4(sp)      lo -> sp+4
+2320C101 ,   \ sw    t3,0(sp)      hi -> sp+0
+;
+
+\ fmul_im ( a b -- a*b mod p )  reuses the mul-free reduce64 from babybear.fam.
+:M fmul_im  umul64im reduce64 ;
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Tests (./tools/fam --test src/babybear.fam src/babybear_im.fam).  Validate
+\ fmul_im against known products, and CROSS-CHECK fmul_im ≡ fmul_i (the dual-API
+\ guarantee: since fmul_i is pinned to Python vectors, agreement validates fmul_im).
+\ ──────────────────────────────────────────────────────────────────────────────
+Test {
+imul0 { 2 lit 3 lit fmul_im 6 lit asrt_eq }
+imul1 { 78000000 lit 78000000 lit fmul_im 1 lit asrt_eq }
+imul2 { 075BCD15 lit 3ADE68B1 lit fmul_im 00632F14 lit asrt_eq }
+imul3 { 3FFFFFFF lit 40000000 lit fmul_im 25DDDDDF lit asrt_eq }
+imul4 { 0 lit 5 lit fmul_im 0 lit asrt_eq }
+\ fmul_im ≡ fmul_i
+xchk0 { 12345678 lit 76543210 lit fmul_im  12345678 lit 76543210 lit fmul_i asrt_eq }
+xchk1 { 77FFFFFF lit 77FFFFFF lit fmul_im  77FFFFFF lit 77FFFFFF lit fmul_i asrt_eq }
+xchk2 { 075BCD15 lit 12345678 lit fmul_im  075BCD15 lit 12345678 lit fmul_i asrt_eq }
+xchk3 { 1 lit 77FFFFFF lit fmul_im  1 lit 77FFFFFF lit fmul_i asrt_eq }
+}

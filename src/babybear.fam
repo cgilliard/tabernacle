@@ -1,0 +1,128 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ src/babybear.fam — BabyBear prime-field arithmetic (rv32i, NO `mul` opcode).
+\
+\ Field: p = 2^31 - 2^27 + 1 = 0x78000001.  Elements are a single 32-bit word in
+\ STANDARD form.  A field multiply is a full 64-bit product (`umul64_i`) followed
+\ by a mul-free reduction (`reduce64`, binary long division) — NOT Montgomery,
+\ whose only win is a cheap mul-based reduction that buys nothing without `mul`.
+\ The 64-bit product is unavoidable: a,b < 2^31 so a*b can be 62 bits, even though
+\ the operands and the reduced result are 32-bit.  The hardware-mul variant
+\ `umul64im` lives in src/babybear_im.fam so this file stays verify_fsm-clean.
+\
+\ ALL ops are `:M` MACROS — they INLINE at every use site (zero `:`-call overhead,
+\ which matters because this no-jalr fam's call/return is not a cheap jal/ret).
+\ Poseidon2 (the critical section) inlines these in its hot loops.  umul64_i/reduce64
+\ are register-asm via `,` (register-only, no scratch -> node-compatible)-- their
+\ internal branches are PC-relative so they inline correctly even nested inside
+\ fpow7.  Encodings assembled by a Python RV32I encoder-- pinned by the tests below.
+\ Data-stack convention (like stdlib `*`): sp+0 = top arg, sp+4 = next.
+\
+\ API (standard-form, single-word elements):
+\   fadd ( a b -- a+b )   fsub ( a b -- a-b )   fneg ( a -- -a )
+\   fmul_i( a b -- a*b )  fsqr ( a -- a^2 )     fpow7( a -- a^7 )   [Poseidon2 S-box]
+\   umul64_i ( a b -- lo hi )   reduce64 ( lo hi -- r )
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ umul64_i ( a b -- lo hi )  full 64-bit unsigned product, software shift-add over
+\ b's bits (branchless conditional add via a -bit mask-- early-exit when b hits 0).
+\ Registers: t0=b t1=a_lo t2=acc_lo t5=acc_hi t4=a_hi t3/t6=temps.
+:M umul64_i
+83220100 ,   \ lw   t0,0(sp)    -- b
+03234100 ,   \ lw   t1,4(sp)    -- a_lo
+93030000 ,   \ li   t2,0        -- acc_lo
+130F0000 ,   \ li   t5,0        -- acc_hi
+930E0000 ,   \ li   t4,0        -- a_hi
+\ LOOP:
+638E0202 ,   \ beqz t0,END      -- b==0 -> done
+13FE1200 ,   \ andi t3,t0,1     -- bit = b&1
+330EC041 ,   \ sub  t3,zero,t3  -- mask = -bit (0 or ~0)
+B3FFCE01 ,   \ and  t6,t4,t3    -- a_hi & mask
+337EC301 ,   \ and  t3,t1,t3    -- a_lo & mask
+B383C301 ,   \ add  t2,t2,t3    -- acc_lo += a_lo&mask
+33BEC301 ,   \ sltu t3,t2,t3    -- carry
+330FCF01 ,   \ add  t5,t5,t3    -- acc_hi += carry
+330FFF01 ,   \ add  t5,t5,t6    -- acc_hi += a_hi&mask
+135EF301 ,   \ srli t3,t1,31    -- carry-out of a_lo
+939E1E00 ,   \ slli t4,t4,1
+B3EECE01 ,   \ or   t4,t4,t3    -- a_hi = (a_hi<<1)|carry
+13131300 ,   \ slli t1,t1,1     -- a_lo <<= 1
+93D21200 ,   \ srli t0,t0,1     -- b >>= 1
+6FF09FFC ,   \ j    LOOP        -- -0x38
+\ END:
+23227100 ,   \ sw   t2,4(sp)    -- lo
+2320E101 ,   \ sw   t5,0(sp)    -- hi
+;
+
+\ reduce64 ( lo hi -- r )  T = hi*2^32 + lo (T < 2^62) mod p, mul-free long division.
+\ rem starts at hi (< p)-- shift in lo's 32 bits MSB-first-- branchless conditional
+\ subtract keeps rem < p.  Registers: t0=rem t1=x t2=p t3=counter t4=temp.
+:M reduce64
+83220100 ,   \ lw   t0,0(sp)    -- rem = hi
+03234100 ,   \ lw   t1,4(sp)    -- x   = lo
+B7030078 ,   \ lui  t2,0x78000
+93831300 ,   \ addi t2,t2,1     -- t2 = p
+130E0002 ,   \ li   t3,32       -- counter
+\ LOOP:
+935EF301 ,   \ srli t4,t1,31    -- top bit of x
+93921200 ,   \ slli t0,t0,1
+B3E2D201 ,   \ or   t0,t0,t4    -- rem = (rem<<1)|bit
+13131300 ,   \ slli t1,t1,1     -- x <<= 1
+B3BE7200 ,   \ sltu t4,t0,t2    -- rem < p ?
+938EFEFF ,   \ addi t4,t4,-1    -- rem>=p ? ~0 : 0
+B3FE7E00 ,   \ and  t4,t4,t2    -- p or 0
+B382D241 ,   \ sub  t0,t0,t4    -- conditional subtract
+130EFEFF ,   \ addi t3,t3,-1
+E31E0EFC ,   \ bnez t3,LOOP     -- -0x24
+13014100 ,   \ addi sp,sp,4     -- pop (2 in, 1 out)
+23205100 ,   \ sw   t0,0(sp)    -- r
+;
+
+\ fmul_i ( a b -- a*b mod p )
+:M fmul_i  umul64_i reduce64 ;
+
+\ fadd ( a b -- a+b mod p )   a,b < p so a+b < 2p < 2^32: one conditional subtract.
+:M fadd  + dup 78000001 lit u< invert if 78000001 lit - then ;
+
+\ fsub ( a b -- a-b mod p )
+:M fsub  2dup u< if - 78000001 lit + else - then ;
+
+\ fneg ( a -- -a mod p )
+:M fneg  dup if 78000001 lit swap - then ;
+
+\ fsqr ( a -- a^2 mod p )
+:M fsqr  dup fmul_i ;
+
+\ fpow7 ( a -- a^7 mod p )  the Poseidon2 S-box.  a7 = ((a^2)^2)*(a^2)*a  (4 muls).
+:M fpow7  dup fsqr dup fsqr over fmul_i nip swap fmul_i ;
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Tests (./tools/fam --test src/babybear.fam).  Vectors computed in Python against
+\ a*b mod p / a+b / a-b / a^7.  No real device-- pure field logic.
+\ ──────────────────────────────────────────────────────────────────────────────
+Test {
+\ reduce64: p -> 0, p+5 -> 5  (basic), plus high-word coverage via fmul below.
+red0 { 78000001 lit 0 lit reduce64 0 lit asrt_eq }
+red1 { 78000006 lit 0 lit reduce64 5 lit asrt_eq }
+\ fmul_i (exercises umul64_i + reduce64, incl. large products with hi != 0)
+mul0 { 2 lit 3 lit fmul_i 6 lit asrt_eq }
+mul1 { 78000000 lit 78000000 lit fmul_i 1 lit asrt_eq }
+mul2 { 78000000 lit 2 lit fmul_i 77FFFFFF lit asrt_eq }
+mul3 { 075BCD15 lit 3ADE68B1 lit fmul_i 00632F14 lit asrt_eq }
+mul4 { 3FFFFFFF lit 40000000 lit fmul_i 25DDDDDF lit asrt_eq }
+mul5 { 12345678 lit 76543210 lit fmul_i 0195674F lit asrt_eq }
+mul6 { 0 lit 5 lit fmul_i 0 lit asrt_eq }
+mul7 { 1 lit 77FFFFFF lit fmul_i 77FFFFFF lit asrt_eq }
+\ fadd / fsub / fneg
+add0 { 77FFFFFF lit 1 lit fadd 78000000 lit asrt_eq }
+add1 { 40000000 lit 40000000 lit fadd 07FFFFFF lit asrt_eq }
+add2 { 77FFFFFF lit 77FFFFFF lit fadd 77FFFFFD lit asrt_eq }
+sub0 { 5 lit 7 lit fsub 77FFFFFF lit asrt_eq }
+sub1 { 7 lit 5 lit fsub 2 lit asrt_eq }
+sub2 { 0 lit 1 lit fsub 78000000 lit asrt_eq }
+neg0 { 1 lit fneg 78000000 lit asrt_eq }
+neg1 { 0 lit fneg 0 lit asrt_eq }
+\ fpow7 (the S-box)
+pow0 { 2 lit fpow7 80 lit asrt_eq }
+pow1 { 3 lit fpow7 088B lit asrt_eq }
+pow2 { 075BCD15 lit fpow7 313D0279 lit asrt_eq }
+}

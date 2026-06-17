@@ -81,6 +81,8 @@ run bin/full_node.bin \
 	lib/stdlib.fam \
 	lib/build.fam \
 	src/fence.fam \
+	src/babybear.fam \
+	src/babybear_im.fam \
 	src/disk.fam \
 	src/net.fam \
 	src/node_serve.fam \
