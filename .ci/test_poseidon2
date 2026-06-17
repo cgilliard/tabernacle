@@ -1,0 +1,32 @@
+#!/bin/sh
+# Poseidon2-BabyBear-16: validate the verifier path (pos2_i, mul-free) on rv32i, and
+# the prover path (pos2_im) on rv32im. Both gated on the full-permutation KAT from the
+# verified reference (tmp/pos2/ref.py); matching it means pos2_i == pos2_im.
+set -e
+exec </dev/null
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+[ -f bin/fam ] || build_fam
+
+echo "--- 1) pos2_i (rv32i, mul-free): ext + intl + full-permutation KAT ---"
+out=$(./tools/fam --test src/babybear.fam src/poseidon2.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: rv32i poseidon2 tests exited non-zero"; exit 1; }
+echo "$out"
+echo "$out" | grep -q 'kat_iota' || { echo "FAIL: full-permutation KAT did not run"; exit 1; }
+echo "$out" | grep -qE '[1-9][0-9]* passed' || { echo "FAIL: no tests ran (silent compile failure?)"; exit 1; }
+
+echo "--- 2) pos2_im (rv32im) + KAT (=> pos2_i == pos2_im) ---"
+MCPU='rv32,m=true,a=false,f=false,d=false,c=false,zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false'
+BIN=$(mktemp)
+( cat lib/stdlib.fam lib/test.fam src/babybear.fam src/babybear_im.fam src/poseidon2.fam src/poseidon2_im.fam; printf '\n_tend\nbye\n\004' ) \
+    | ./tools/q32 bin/fam > "$BIN" 2>/dev/null
+[ "$(head -c4 "$BIN" | xxd -p)" = "13000000" ] \
+    || { echo "FAIL: rv32im poseidon2 binary did not compile"; rm -f "$BIN"; exit 1; }
+out=$(timeout 90 ./tools/q32 --cpu="$MCPU" "$BIN" </dev/null 2>&1) \
+    || { echo "$out"; echo "FAIL: rv32im poseidon2 tests exited non-zero (or timed out)"; rm -f "$BIN"; exit 1; }
+echo "$out"
+echo "$out" | grep -q 'kati_iota' || { echo "FAIL: pos2_im KAT did not run"; rm -f "$BIN"; exit 1; }
+echo "$out" | grep -qE '[1-9][0-9]* passed' || { echo "FAIL: rv32im suite did not pass"; rm -f "$BIN"; exit 1; }
+rm -f "$BIN"
+
+echo "test_poseidon2: PASS"

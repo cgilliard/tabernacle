@@ -24,6 +24,10 @@ B3035302 ,   \ mul   t2,t1,t0      t2 = lo = a*b
 \ fmul_im ( a b -- a*b mod p )  reuses the mul-free reduce64 from babybear.fam.
 :M fmul_im  umul64im reduce64 ;
 
+\ fsqr_im / fpow7im ( a -- a^2 / a^7 )  hardware-mul S-box helpers (prover path).
+:M fsqr_im   dup fmul_im ;
+:M fpow7im   dup fsqr_im dup fsqr_im over fmul_im nip swap fmul_im ;
+
 \ ──────────────────────────────────────────────────────────────────────────────
 \ Tests (./tools/fam --test src/babybear.fam src/babybear_im.fam).  Validate
 \ fmul_im against known products, and CROSS-CHECK fmul_im ≡ fmul_i (the dual-API

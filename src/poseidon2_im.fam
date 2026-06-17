@@ -1,0 +1,382 @@
+\ ── src/poseidon2_im.fam — Poseidon2 prover path (rv32im, inlines fmul_im).
+\ Reuses ext + sponge helpers (zero16/addblk/finblk/squee) from src/poseidon2.fam. Build AFTER it.
+
+\ ── intl_im ( s w -- s w ) ──
+: intl_im
+  over @  2 lit pick 4 lit + @ fadd  2 lit pick 8 lit + @ fadd  2 lit pick C lit + @ fadd  2 lit pick 10 lit + @ fadd  2 lit pick 14 lit + @ fadd  2 lit pick 18 lit + @ fadd  2 lit pick 1C lit + @ fadd  2 lit pick 20 lit + @ fadd  2 lit pick 24 lit + @ fadd  2 lit pick 28 lit + @ fadd  2 lit pick 2C lit + @ fadd  2 lit pick 30 lit + @ fadd  2 lit pick 34 lit + @ fadd  2 lit pick 38 lit + @ fadd  2 lit pick 3C lit + @ fadd
+  2 lit pick 0 lit + @ 0A632D93 lit fmul_im  1 lit pick fadd  3 lit pick 0 lit + !
+  2 lit pick 4 lit + @ 6DB657B6 lit fmul_im  1 lit pick fadd  3 lit pick 4 lit + !
+  2 lit pick 8 lit + @ 56FBDC9D lit fmul_im  1 lit pick fadd  3 lit pick 8 lit + !
+  2 lit pick C lit + @ 052B3D89 lit fmul_im  1 lit pick fadd  3 lit pick C lit + !
+  2 lit pick 10 lit + @ 33745200 lit fmul_im  1 lit pick fadd  3 lit pick 10 lit + !
+  2 lit pick 14 lit + @ 5C03108B lit fmul_im  1 lit pick fadd  3 lit pick 14 lit + !
+  2 lit pick 18 lit + @ 0BEBA37A lit fmul_im  1 lit pick fadd  3 lit pick 18 lit + !
+  2 lit pick 1C lit + @ 258C2E8A lit fmul_im  1 lit pick fadd  3 lit pick 1C lit + !
+  2 lit pick 20 lit + @ 12029F38 lit fmul_im  1 lit pick fadd  3 lit pick 20 lit + !
+  2 lit pick 24 lit + @ 694909CD lit fmul_im  1 lit pick fadd  3 lit pick 24 lit + !
+  2 lit pick 28 lit + @ 6D231723 lit fmul_im  1 lit pick fadd  3 lit pick 28 lit + !
+  2 lit pick 2C lit + @ 21C3B221 lit fmul_im  1 lit pick fadd  3 lit pick 2C lit + !
+  2 lit pick 30 lit + @ 3C0904A4 lit fmul_im  1 lit pick fadd  3 lit pick 30 lit + !
+  2 lit pick 34 lit + @ 01D6ACD9 lit fmul_im  1 lit pick fadd  3 lit pick 34 lit + !
+  2 lit pick 38 lit + @ 27705C82 lit fmul_im  1 lit pick fadd  3 lit pick 38 lit + !
+  2 lit pick 3C lit + @ 5231C801 lit fmul_im  1 lit pick fadd  3 lit pick 3C lit + !
+  drop
+;
+
+\ ── sboxa_im ( s w -- s w ) ──
+: sboxa_im
+  over 0 lit + @ fpow7im  2 lit pick 0 lit + !
+  over 4 lit + @ fpow7im  2 lit pick 4 lit + !
+  over 8 lit + @ fpow7im  2 lit pick 8 lit + !
+  over C lit + @ fpow7im  2 lit pick C lit + !
+  over 10 lit + @ fpow7im  2 lit pick 10 lit + !
+  over 14 lit + @ fpow7im  2 lit pick 14 lit + !
+  over 18 lit + @ fpow7im  2 lit pick 18 lit + !
+  over 1C lit + @ fpow7im  2 lit pick 1C lit + !
+  over 20 lit + @ fpow7im  2 lit pick 20 lit + !
+  over 24 lit + @ fpow7im  2 lit pick 24 lit + !
+  over 28 lit + @ fpow7im  2 lit pick 28 lit + !
+  over 2C lit + @ fpow7im  2 lit pick 2C lit + !
+  over 30 lit + @ fpow7im  2 lit pick 30 lit + !
+  over 34 lit + @ fpow7im  2 lit pick 34 lit + !
+  over 38 lit + @ fpow7im  2 lit pick 38 lit + !
+  over 3C lit + @ fpow7im  2 lit pick 3C lit + !
+;
+
+\ ── pos2_im ( s w -- s w )  full permutation, prover path ──
+: pos2_im
+  ext
+  over 0 lit + @ 61E097F6 lit fadd  2 lit pick 0 lit + !
+  over 4 lit + @ 7082D38F lit fadd  2 lit pick 4 lit + !
+  over 8 lit + @ 1FBC9D4A lit fadd  2 lit pick 8 lit + !
+  over C lit + @ 154422B6 lit fadd  2 lit pick C lit + !
+  over 10 lit + @ 5064226E lit fadd  2 lit pick 10 lit + !
+  over 14 lit + @ 1287488F lit fadd  2 lit pick 14 lit + !
+  over 18 lit + @ 3447BDC9 lit fadd  2 lit pick 18 lit + !
+  over 1C lit + @ 5205B30E lit fadd  2 lit pick 1C lit + !
+  over 20 lit + @ 187D04C2 lit fadd  2 lit pick 20 lit + !
+  over 24 lit + @ 192B97F1 lit fadd  2 lit pick 24 lit + !
+  over 28 lit + @ 3837CCB6 lit fadd  2 lit pick 28 lit + !
+  over 2C lit + @ 3F3A61CF lit fadd  2 lit pick 2C lit + !
+  over 30 lit + @ 106BA625 lit fadd  2 lit pick 30 lit + !
+  over 34 lit + @ 183D5513 lit fadd  2 lit pick 34 lit + !
+  over 38 lit + @ 3F9E9A85 lit fadd  2 lit pick 38 lit + !
+  over 3C lit + @ 6483B93A lit fadd  2 lit pick 3C lit + !
+  sboxa_im ext
+  over 0 lit + @ 185069EA lit fadd  2 lit pick 0 lit + !
+  over 4 lit + @ 6D0522E4 lit fadd  2 lit pick 4 lit + !
+  over 8 lit + @ 03A94793 lit fadd  2 lit pick 8 lit + !
+  over C lit + @ 0B6A7C5C lit fadd  2 lit pick C lit + !
+  over 10 lit + @ 4EA75772 lit fadd  2 lit pick 10 lit + !
+  over 14 lit + @ 44BA652D lit fadd  2 lit pick 14 lit + !
+  over 18 lit + @ 05D5D8DF lit fadd  2 lit pick 18 lit + !
+  over 1C lit + @ 02666BBF lit fadd  2 lit pick 1C lit + !
+  over 20 lit + @ 339B2242 lit fadd  2 lit pick 20 lit + !
+  over 24 lit + @ 2AEEBEEB lit fadd  2 lit pick 24 lit + !
+  over 28 lit + @ 27FC9AE6 lit fadd  2 lit pick 28 lit + !
+  over 2C lit + @ 2C05A0C4 lit fadd  2 lit pick 2C lit + !
+  over 30 lit + @ 1B3C2F80 lit fadd  2 lit pick 30 lit + !
+  over 34 lit + @ 01E13ACF lit fadd  2 lit pick 34 lit + !
+  over 38 lit + @ 03F93BB9 lit fadd  2 lit pick 38 lit + !
+  over 3C lit + @ 4C181A34 lit fadd  2 lit pick 3C lit + !
+  sboxa_im ext
+  over 0 lit + @ 1B45155F lit fadd  2 lit pick 0 lit + !
+  over 4 lit + @ 31DF58E9 lit fadd  2 lit pick 4 lit + !
+  over 8 lit + @ 29AC5DD1 lit fadd  2 lit pick 8 lit + !
+  over C lit + @ 1DB7E7E6 lit fadd  2 lit pick C lit + !
+  over 10 lit + @ 4EFAE3C8 lit fadd  2 lit pick 10 lit + !
+  over 14 lit + @ 50DD4364 lit fadd  2 lit pick 14 lit + !
+  over 18 lit + @ 3FC696EC lit fadd  2 lit pick 18 lit + !
+  over 1C lit + @ 0D0562ED lit fadd  2 lit pick 1C lit + !
+  over 20 lit + @ 6C39161F lit fadd  2 lit pick 20 lit + !
+  over 24 lit + @ 655ACB74 lit fadd  2 lit pick 24 lit + !
+  over 28 lit + @ 531B8FFB lit fadd  2 lit pick 28 lit + !
+  over 2C lit + @ 5C99AC17 lit fadd  2 lit pick 2C lit + !
+  over 30 lit + @ 6339853C lit fadd  2 lit pick 30 lit + !
+  over 34 lit + @ 1357BA33 lit fadd  2 lit pick 34 lit + !
+  over 38 lit + @ 152D3A86 lit fadd  2 lit pick 38 lit + !
+  over 3C lit + @ 6E518E3E lit fadd  2 lit pick 3C lit + !
+  sboxa_im ext
+  over 0 lit + @ 13FE0B95 lit fadd  2 lit pick 0 lit + !
+  over 4 lit + @ 45886F7F lit fadd  2 lit pick 4 lit + !
+  over 8 lit + @ 7197AF91 lit fadd  2 lit pick 8 lit + !
+  over C lit + @ 65ACE105 lit fadd  2 lit pick C lit + !
+  over 10 lit + @ 202D5AF9 lit fadd  2 lit pick 10 lit + !
+  over 14 lit + @ 185EA95D lit fadd  2 lit pick 14 lit + !
+  over 18 lit + @ 2400873D lit fadd  2 lit pick 18 lit + !
+  over 1C lit + @ 126C8B0E lit fadd  2 lit pick 1C lit + !
+  over 20 lit + @ 731C6DB2 lit fadd  2 lit pick 20 lit + !
+  over 24 lit + @ 4395A588 lit fadd  2 lit pick 24 lit + !
+  over 28 lit + @ 64280172 lit fadd  2 lit pick 28 lit + !
+  over 2C lit + @ 158257F6 lit fadd  2 lit pick 2C lit + !
+  over 30 lit + @ 4FE73999 lit fadd  2 lit pick 30 lit + !
+  over 34 lit + @ 408F19D6 lit fadd  2 lit pick 34 lit + !
+  over 38 lit + @ 76BEB68A lit fadd  2 lit pick 38 lit + !
+  over 3C lit + @ 50A1A6BC lit fadd  2 lit pick 3C lit + !
+  sboxa_im ext
+  over @ 568CEFBF lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 19F743FF lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 6B09372B lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 4BA12CF4 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 6B16A893 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 1353EC74 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 566B3A43 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 44FFB8F6 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 3C1E9310 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 01D19C91 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 34E7F670 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 56D56A99 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over @ 0ED5F766 lit fadd  2 lit pick !
+  over @ fpow7im  2 lit pick !  intl_im
+  over 0 lit + @ 6516DF6A lit fadd  2 lit pick 0 lit + !
+  over 4 lit + @ 2F2965B6 lit fadd  2 lit pick 4 lit + !
+  over 8 lit + @ 4B66C39F lit fadd  2 lit pick 8 lit + !
+  over C lit + @ 0BD6E916 lit fadd  2 lit pick C lit + !
+  over 10 lit + @ 32983AC1 lit fadd  2 lit pick 10 lit + !
+  over 14 lit + @ 5A06813F lit fadd  2 lit pick 14 lit + !
+  over 18 lit + @ 46373551 lit fadd  2 lit pick 18 lit + !
+  over 1C lit + @ 4305FBD9 lit fadd  2 lit pick 1C lit + !
+  over 20 lit + @ 5059BF64 lit fadd  2 lit pick 20 lit + !
+  over 24 lit + @ 6024B5A7 lit fadd  2 lit pick 24 lit + !
+  over 28 lit + @ 023326AF lit fadd  2 lit pick 28 lit + !
+  over 2C lit + @ 41E3A815 lit fadd  2 lit pick 2C lit + !
+  over 30 lit + @ 3F0AD4DE lit fadd  2 lit pick 30 lit + !
+  over 34 lit + @ 177008EE lit fadd  2 lit pick 34 lit + !
+  over 38 lit + @ 5F29881B lit fadd  2 lit pick 38 lit + !
+  over 3C lit + @ 474E32FC lit fadd  2 lit pick 3C lit + !
+  sboxa_im ext
+  over 0 lit + @ 2BD73B23 lit fadd  2 lit pick 0 lit + !
+  over 4 lit + @ 2E693B33 lit fadd  2 lit pick 4 lit + !
+  over 8 lit + @ 307DB94C lit fadd  2 lit pick 8 lit + !
+  over C lit + @ 0C539E9E lit fadd  2 lit pick C lit + !
+  over 10 lit + @ 663F04A7 lit fadd  2 lit pick 10 lit + !
+  over 14 lit + @ 70F42DE6 lit fadd  2 lit pick 14 lit + !
+  over 18 lit + @ 7259539D lit fadd  2 lit pick 18 lit + !
+  over 1C lit + @ 521406C8 lit fadd  2 lit pick 1C lit + !
+  over 20 lit + @ 376E3130 lit fadd  2 lit pick 20 lit + !
+  over 24 lit + @ 462090BB lit fadd  2 lit pick 24 lit + !
+  over 28 lit + @ 0C4DCA66 lit fadd  2 lit pick 28 lit + !
+  over 2C lit + @ 6FF636C5 lit fadd  2 lit pick 2C lit + !
+  over 30 lit + @ 184DC23F lit fadd  2 lit pick 30 lit + !
+  over 34 lit + @ 67DC7D7D lit fadd  2 lit pick 34 lit + !
+  over 38 lit + @ 243F068C lit fadd  2 lit pick 38 lit + !
+  over 3C lit + @ 715A7AC1 lit fadd  2 lit pick 3C lit + !
+  sboxa_im ext
+  over 0 lit + @ 1BCC375F lit fadd  2 lit pick 0 lit + !
+  over 4 lit + @ 09146855 lit fadd  2 lit pick 4 lit + !
+  over 8 lit + @ 25C56D76 lit fadd  2 lit pick 8 lit + !
+  over C lit + @ 6B0431D0 lit fadd  2 lit pick C lit + !
+  over 10 lit + @ 29220015 lit fadd  2 lit pick 10 lit + !
+  over 14 lit + @ 0C537C2C lit fadd  2 lit pick 14 lit + !
+  over 18 lit + @ 530B903D lit fadd  2 lit pick 18 lit + !
+  over 1C lit + @ 50F15A3B lit fadd  2 lit pick 1C lit + !
+  over 20 lit + @ 7613AA15 lit fadd  2 lit pick 20 lit + !
+  over 24 lit + @ 26E07866 lit fadd  2 lit pick 24 lit + !
+  over 28 lit + @ 0D4E901A lit fadd  2 lit pick 28 lit + !
+  over 2C lit + @ 547649ED lit fadd  2 lit pick 2C lit + !
+  over 30 lit + @ 44BE6C6D lit fadd  2 lit pick 30 lit + !
+  over 34 lit + @ 0B5F885E lit fadd  2 lit pick 34 lit + !
+  over 38 lit + @ 33AA6D8D lit fadd  2 lit pick 38 lit + !
+  over 3C lit + @ 409A1618 lit fadd  2 lit pick 3C lit + !
+  sboxa_im ext
+  over 0 lit + @ 306613F1 lit fadd  2 lit pick 0 lit + !
+  over 4 lit + @ 5CE23B02 lit fadd  2 lit pick 4 lit + !
+  over 8 lit + @ 547A082B lit fadd  2 lit pick 8 lit + !
+  over C lit + @ 44C6E22F lit fadd  2 lit pick C lit + !
+  over 10 lit + @ 4BCD4CC6 lit fadd  2 lit pick 10 lit + !
+  over 14 lit + @ 22F75FB3 lit fadd  2 lit pick 14 lit + !
+  over 18 lit + @ 6AE9BE94 lit fadd  2 lit pick 18 lit + !
+  over 1C lit + @ 0C12F111 lit fadd  2 lit pick 1C lit + !
+  over 20 lit + @ 46B904EB lit fadd  2 lit pick 20 lit + !
+  over 24 lit + @ 3262C652 lit fadd  2 lit pick 24 lit + !
+  over 28 lit + @ 54893399 lit fadd  2 lit pick 28 lit + !
+  over 2C lit + @ 10F89AC6 lit fadd  2 lit pick 2C lit + !
+  over 30 lit + @ 528597B4 lit fadd  2 lit pick 30 lit + !
+  over 34 lit + @ 60986933 lit fadd  2 lit pick 34 lit + !
+  over 38 lit + @ 5A1FD2D2 lit fadd  2 lit pick 38 lit + !
+  over 3C lit + @ 667B4653 lit fadd  2 lit pick 3C lit + !
+  sboxa_im ext
+;
+
+\ ── prover sponge (reuses zero16/addblk/finblk/squee from poseidon2.fam) ──
+: permh_im   dup 14 lit + over 54 lit + pos2_im 2drop ;
+: p2hashim
+A0 lit alloc  tuck 8 lit + !  tuck 4 lit + !  tuck !
+dup 14 lit + zero16
+0 lit over C lit + !
+begin  dup C lit + @ 8 lit +  over 4 lit + @ u> invert
+while  addblk  permh_im  dup C lit + dup @ 8 lit + swap !
+repeat
+finblk  permh_im  squee  drop ;
+
+Test {
+kati_zero {
+40 lit alloc
+0 lit over 0 lit + !
+0 lit over 4 lit + !
+0 lit over 8 lit + !
+0 lit over C lit + !
+0 lit over 10 lit + !
+0 lit over 14 lit + !
+0 lit over 18 lit + !
+0 lit over 1C lit + !
+0 lit over 20 lit + !
+0 lit over 24 lit + !
+0 lit over 28 lit + !
+0 lit over 2C lit + !
+0 lit over 30 lit + !
+0 lit over 34 lit + !
+0 lit over 38 lit + !
+0 lit over 3C lit + !
+40 lit alloc pos2_im
+over 0 lit + @ 144D605A lit asrt_eq
+over 4 lit + @ 3F68CB34 lit asrt_eq
+over 8 lit + @ 6C10A86E lit asrt_eq
+over C lit + @ 05233E3D lit asrt_eq
+over 10 lit + @ 19511686 lit asrt_eq
+over 14 lit + @ 2EC011B7 lit asrt_eq
+over 18 lit + @ 3CA345D5 lit asrt_eq
+over 1C lit + @ 12429DB7 lit asrt_eq
+over 20 lit + @ 10089213 lit asrt_eq
+over 24 lit + @ 132F7444 lit asrt_eq
+over 28 lit + @ 69A4A289 lit asrt_eq
+over 2C lit + @ 5E51292D lit asrt_eq
+over 30 lit + @ 1F127373 lit asrt_eq
+over 34 lit + @ 5059A26B lit asrt_eq
+over 38 lit + @ 4F677B24 lit asrt_eq
+over 3C lit + @ 36FEFA29 lit asrt_eq
+2drop
+}
+kati_iota {
+40 lit alloc
+0 lit over 0 lit + !
+1 lit over 4 lit + !
+2 lit over 8 lit + !
+3 lit over C lit + !
+4 lit over 10 lit + !
+5 lit over 14 lit + !
+6 lit over 18 lit + !
+7 lit over 1C lit + !
+8 lit over 20 lit + !
+9 lit over 24 lit + !
+A lit over 28 lit + !
+B lit over 2C lit + !
+C lit over 30 lit + !
+D lit over 34 lit + !
+E lit over 38 lit + !
+F lit over 3C lit + !
+40 lit alloc pos2_im
+over 0 lit + @ 61768812 lit asrt_eq
+over 4 lit + @ 681C7962 lit asrt_eq
+over 8 lit + @ 4408EAA0 lit asrt_eq
+over C lit + @ 28B3F268 lit asrt_eq
+over 10 lit + @ 34F53542 lit asrt_eq
+over 14 lit + @ 123DFCF7 lit asrt_eq
+over 18 lit + @ 3BCFF9B9 lit asrt_eq
+over 1C lit + @ 2CB3F971 lit asrt_eq
+over 20 lit + @ 603BFA74 lit asrt_eq
+over 24 lit + @ 484402E1 lit asrt_eq
+over 28 lit + @ 3F5E5011 lit asrt_eq
+over 2C lit + @ 1A9760A6 lit asrt_eq
+over 30 lit + @ 23C62D67 lit asrt_eq
+over 34 lit + @ 17DFE4FD lit asrt_eq
+over 38 lit + @ 35935D9F lit asrt_eq
+over 3C lit + @ 1C76D01A lit asrt_eq
+2drop
+}
+spi_empty {
+20 lit alloc
+4 lit alloc
+0 lit 2 lit pick p2hashim
+dup 0 lit + @ 207FB9A9 lit asrt_eq
+dup 4 lit + @ 01D1CA71 lit asrt_eq
+dup 8 lit + @ 4376B3FC lit asrt_eq
+dup C lit + @ 1E25223A lit asrt_eq
+dup 10 lit + @ 1A75E747 lit asrt_eq
+dup 14 lit + @ 6F03049F lit asrt_eq
+dup 18 lit + @ 4175CE46 lit asrt_eq
+dup 1C lit + @ 00962154 lit asrt_eq
+drop
+}
+spi_one {
+20 lit alloc
+4 lit alloc
+5 lit over 0 lit + !
+1 lit 2 lit pick p2hashim
+dup 0 lit + @ 1B25FA77 lit asrt_eq
+dup 4 lit + @ 53E6260F lit asrt_eq
+dup 8 lit + @ 4AE86474 lit asrt_eq
+dup C lit + @ 18A7028C lit asrt_eq
+dup 10 lit + @ 1EB27491 lit asrt_eq
+dup 14 lit + @ 15E4322C lit asrt_eq
+dup 18 lit + @ 7012165E lit asrt_eq
+dup 1C lit + @ 3AE4B36D lit asrt_eq
+drop
+}
+spi_nine {
+20 lit alloc
+24 lit alloc
+0 lit over 0 lit + !
+1 lit over 4 lit + !
+2 lit over 8 lit + !
+3 lit over C lit + !
+4 lit over 10 lit + !
+5 lit over 14 lit + !
+6 lit over 18 lit + !
+7 lit over 1C lit + !
+8 lit over 20 lit + !
+9 lit 2 lit pick p2hashim
+dup 0 lit + @ 569C08CD lit asrt_eq
+dup 4 lit + @ 193C1535 lit asrt_eq
+dup 8 lit + @ 69691AA9 lit asrt_eq
+dup C lit + @ 65B4CFF6 lit asrt_eq
+dup 10 lit + @ 5147EF22 lit asrt_eq
+dup 14 lit + @ 572E2B74 lit asrt_eq
+dup 18 lit + @ 2FDD7604 lit asrt_eq
+dup 1C lit + @ 1020C2FE lit asrt_eq
+drop
+}
+spi_17 {
+20 lit alloc
+44 lit alloc
+0 lit over 0 lit + !
+1 lit over 4 lit + !
+2 lit over 8 lit + !
+3 lit over C lit + !
+4 lit over 10 lit + !
+5 lit over 14 lit + !
+6 lit over 18 lit + !
+7 lit over 1C lit + !
+8 lit over 20 lit + !
+9 lit over 24 lit + !
+A lit over 28 lit + !
+B lit over 2C lit + !
+C lit over 30 lit + !
+D lit over 34 lit + !
+E lit over 38 lit + !
+F lit over 3C lit + !
+10 lit over 40 lit + !
+11 lit 2 lit pick p2hashim
+dup 0 lit + @ 25431CB2 lit asrt_eq
+dup 4 lit + @ 06247C1F lit asrt_eq
+dup 8 lit + @ 0F200E01 lit asrt_eq
+dup C lit + @ 424DC38E lit asrt_eq
+dup 10 lit + @ 5122C224 lit asrt_eq
+dup 14 lit + @ 0E39FB31 lit asrt_eq
+dup 18 lit + @ 5D3AF4C8 lit asrt_eq
+dup 1C lit + @ 41B90E26 lit asrt_eq
+drop
+}
+}
