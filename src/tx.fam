@@ -219,6 +219,7 @@
   drop
   dup @ 534E5854 lit =  over 4 lit + @ 1 lit =  and  1 lit and  nip ;
 
+
 Test {
 tx1 {
 20 lit alloc
@@ -348,4 +349,45 @@ dup 8 lit + @
 7 lit over 20 lit + !  0 lit over 24 lit + !
 drop
 dup txvalid 0 lit asrt_eq  drop }
+txlife {
+44 lit alloc
+0 lit over !  0 lit over 4 lit + !
+50 lit alloc over 8 lit + !
+10D0 lit alloc over C lit + !
+10C0 lit alloc over 10 lit + !
+20 lit alloc over 14 lit + !
+B0 lit alloc over 18 lit + !
+A0 lit alloc over 1C lit + !
+50 lit alloc over 20 lit + !
+110 lit alloc over 24 lit + !
+870 lit alloc over 28 lit + !
+860 lit alloc over 2C lit + !
+860 lit alloc over 30 lit + !
+860 lit alloc over 34 lit + !
+20 lit alloc over 38 lit + !
+dup 38 lit + @  1 lit over ! 2 lit over 4 lit + ! 3 lit over 8 lit + ! 4 lit over C lit + ! 5 lit over 10 lit + ! 6 lit over 14 lit + ! 7 lit over 18 lit + ! 8 lit over 1C lit + ! drop
+dup 38 lit + @  over 2C lit + @  2 lit pick 1C lit + @  wkeysk
+43 lit 0 lit do  dup 2C lit + @ i 20 lit * +  over 34 lit + @ i 20 lit * +  F lit  3 lit pick 1C lit + @  wchain  loop
+dup  dup 34 lit + @  64 lit 0 lit  txaddin
+dup 38 lit + @  B lit over ! C lit over 4 lit + ! D lit over 8 lit + ! E lit over C lit + ! F lit over 10 lit + ! 10 lit over 14 lit + ! 11 lit over 18 lit + ! 12 lit over 1C lit + ! drop
+dup 38 lit + @  over 30 lit + @  2 lit pick 1C lit + @  wkeysk
+43 lit 0 lit do  dup 30 lit + @ i 20 lit * +  over 34 lit + @ i 20 lit * +  F lit  3 lit pick 1C lit + @  wchain  loop
+dup  dup 34 lit + @  32 lit 0 lit  txaddin
+dup 34 lit + @  77000000 lit over ! 1 lit over 4 lit + ! 2 lit over 8 lit + ! 3 lit over C lit + ! 4 lit over 10 lit + ! 5 lit over 14 lit + ! 6 lit over 18 lit + ! 7 lit over 1C lit + !
+1 lit pick 1 lit pick 50 lit 0 lit txaddout drop
+dup 34 lit + @  33000000 lit over ! 1 lit over 4 lit + ! 2 lit over 8 lit + ! 3 lit over C lit + ! 4 lit over 10 lit + ! 5 lit over 14 lit + ! 6 lit over 18 lit + ! 7 lit over 1C lit + !
+1 lit pick 1 lit pick 3C lit 0 lit txaddout drop
+dup txfin
+dup  dup 2C lit + @  txsign
+dup  dup 30 lit + @  txsign
+dup txvalid 1 lit asrt_eq
+2400 lit alloc  1 lit pick 1 lit pick txenc drop
+44 lit alloc  0 lit over !  0 lit over 4 lit + !
+50 lit alloc over 8 lit + !  10D0 lit alloc over C lit + !  10C0 lit alloc over 10 lit + !
+20 lit alloc over 14 lit + !  B0 lit alloc over 18 lit + !  A0 lit alloc over 1C lit + !
+50 lit alloc over 20 lit + !  110 lit alloc over 24 lit + !  870 lit alloc over 28 lit + !
+1 lit pick over txdec 1 lit asrt_eq
+dup txvalid 1 lit asrt_eq
+2drop drop }
+
 }
