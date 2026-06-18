@@ -2,7 +2,7 @@
 \ src/pow.fam — memory-hard proof-of-work hash (Poseidon2-BabyBear seed + walk).
 \ Verifier side: given a block header and the pre-expanded bible table, recompute
 \ the PoW hash. Design (see design discussion): ONE strong Poseidon2 at the start
-\ conditions the input; the 32-round walk is a cheap, in-circuit-friendly BabyBear
+\ conditions the input; the 128-round walk is a cheap, in-circuit-friendly BabyBear
 \ FIELD-ADD mixing over a high-entropy table, with a running accumulator threading
 \ every read into ONE depth-32 dependent chain. NO Poseidon2 in the loop (that was
 \ compute-hard, not memory-hard, and a huge AIR); NO finalization hash (PoW needs
@@ -12,17 +12,19 @@
 \ Built on p2hash (poseidon2.fam) + fadd (babybear.fam); compile AFTER both.
 \   powhash ( hdr n table mask out scr -- )
 \     out(8w) = w;  w = p2hash(hdr,n);  acc = 0 (kept in scr[0]);
-\     32x:  j = (r&7);  idx = (w[j]+acc)&mask;  w[j] += table[idx];  acc += w[j].
+\     128x: j = (r&7);  idx = (w[j]+acc)&mask;  w[j] += table[idx];  acc += w[j].
 \     scr >= 0xA0 (p2hash scratch; scr[0] reused for acc after the seed).
+\ ROUNDS = 128 (0x80): the walk dwarfs the one-time seed hash so an ASIC stays
+\ memory-bound; even a fast-banked-SRAM build is pushed toward its ~67% floor.
 \ table = NSLOT single-word field entries (NOT 8-word slots), pre-expanded, shipped.
-\ Production mask = 0x7FFFF (524288 slots); ROUNDS stays 32. Difficulty/target
+\ Production mask = 0x7FFFF (524288 slots). Difficulty/target
 \ compare folds all 8 words (field add) downstream. Python ref: tmp/pos2/powref.py.
 \ ──────────────────────────────────────────────────────────────────────────────
 
 : powhash ( hdr n table mask out scr -- )
   5 lit pick 5 lit pick 3 lit pick 3 lit pick p2hash   \ out = p2hash(hdr,n)
   0 lit over !                                          \ acc := 0  (in scr[0])
-  20 lit 0 lit do
+  80 lit 0 lit do
     i 7 lit and 2 lit lshift                            \ j4 = (r&7)<<2
     2 lit pick +                                        \ wp = out + j4
     dup @                                               \ wv = w[j]
@@ -81,14 +83,14 @@ pow0 {
   20 lit alloc
   A0 lit alloc
   20 lit alloc
-  19313E11 lit over !
-  1EA295C0 lit over 4 lit + !
-  363773D9 lit over 8 lit + !
-  1994F2E0 lit over C lit + !
-  195217DD lit over 10 lit + !
-  594A32D4 lit over 14 lit + !
-  0180D7A5 lit over 18 lit + !
-  4B45E4CC lit over 1C lit + !
+  53BB87FC lit over !
+  4DAE675E lit over 4 lit + !
+  55B67BCC lit over 8 lit + !
+  55AB4075 lit over C lit + !
+  747B3CF4 lit over 10 lit + !
+  3AF55CFA lit over 14 lit + !
+  4CBAB861 lit over 18 lit + !
+  660F83FA lit over 1C lit + !
   \ stack: table header out scr eOUT
   3 lit pick  5 lit  6 lit pick  0000001F lit  6 lit pick  6 lit pick  powhash
   2 lit pick 1 lit pick cmp8  1 lit asrt_eq

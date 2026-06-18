@@ -1,6 +1,6 @@
 #!/bin/sh
 # Memory-hard proof-of-work hash (src/pow.fam): Poseidon2-BabyBear seed + walk.
-# powhash recomputes a block header's PoW hash = p2hash(header), then 32x a cheap
+# powhash recomputes a block header's PoW hash = p2hash(header), then 128x a cheap
 # BabyBear field-add walk { j=(r&7); idx=(w[j]+acc)&mask; w[j]+=table[idx];
 # acc+=w[j] } over the pre-expanded bible table (single-word entries), threading
 # one depth-32 dependent chain. No Poseidon2 in the loop, no finalization hash.
