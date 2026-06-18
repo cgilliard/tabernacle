@@ -51,6 +51,7 @@ jobs:
           - test_poseidon2      # Poseidon2-BabyBear-16: pos2_i KAT on rv32i + pos2_im KAT on rv32im (== pos2_i)
           - test_wotsp          # WOTS+ over Poseidon2-BabyBear-16: keygen/sign/verify round-trip + tamper reject (rv32i + rv32im)
           - test_tx             # Transactions: body_hash + commitment + sign/validate + tamper reject (rv32i + rv32im)
+          - test_tx_lifecycle   # Full 2-in/2-out tx lifecycle: create/add/finalize/sign/serialize/deser/verify (rv32i + rv32im)
     steps:
       - name: Checkout
         uses: actions/checkout@v5

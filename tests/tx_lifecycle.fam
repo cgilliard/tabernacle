@@ -1,0 +1,66 @@
+\ ── tests/tx_lifecycle.fam — 2-input / 2-output full transaction lifecycle ──
+\ create -> add 2 inputs + 2 outputs -> finalize (sort + body_hash) -> sign both
+\ -> serialize -> deserialize (into a fresh context) -> validate.
+\ Standalone program (NOT a fam --test block: the --test harness mishandles the
+\ large txenc/txdec words; the production build path via lib/build.fam is fine,
+\ same as this). Run by .ci/test_tx_lifecycle, which checks valid1=1 AND valid2=1.
+\ Compiled against babybear/poseidon2/wotsp/tx with their Test{} blocks stripped.
+
+: phn dup A lit u< if 30 lit + else 37 lit + then putc ;
+: ph8 dup 1C lit rshift F lit and phn dup 18 lit rshift F lit and phn dup 14 lit rshift F lit and phn dup 10 lit rshift F lit and phn dup C lit rshift F lit and phn dup 8 lit rshift F lit and phn dup 4 lit rshift F lit and phn F lit and phn  0A lit putc ;
+
+\ tx context t (2-record buffers). +2C sk0 +30 sk1 +34 pktmp +38 seed (test scratch).
+44 lit alloc
+0 lit over !  0 lit over 4 lit + !
+50 lit alloc over 8 lit + !
+10D0 lit alloc over C lit + !
+10C0 lit alloc over 10 lit + !
+20 lit alloc over 14 lit + !
+B0 lit alloc over 18 lit + !
+A0 lit alloc over 1C lit + !
+50 lit alloc over 20 lit + !
+110 lit alloc over 24 lit + !
+870 lit alloc over 28 lit + !
+860 lit alloc over 2C lit + !
+860 lit alloc over 30 lit + !
+860 lit alloc over 34 lit + !
+20 lit alloc over 38 lit + !
+
+\ keypair 0 (seed 1..8) -> sk0, derive pubkey, add as input (amount 0x64)
+dup 38 lit + @  1 lit over ! 2 lit over 4 lit + ! 3 lit over 8 lit + ! 4 lit over C lit + ! 5 lit over 10 lit + ! 6 lit over 14 lit + ! 7 lit over 18 lit + ! 8 lit over 1C lit + ! drop
+dup 38 lit + @  over 2C lit + @  2 lit pick 1C lit + @  wkeysk
+43 lit 0 lit do  dup 2C lit + @ i 20 lit * +  over 34 lit + @ i 20 lit * +  F lit  3 lit pick 1C lit + @  wchain  loop
+dup  dup 34 lit + @  64 lit 0 lit  txaddin
+
+\ keypair 1 (seed 0xB..0x12) -> sk1, derive pubkey, add as input (amount 0x32)
+dup 38 lit + @  B lit over ! C lit over 4 lit + ! D lit over 8 lit + ! E lit over C lit + ! F lit over 10 lit + ! 10 lit over 14 lit + ! 11 lit over 18 lit + ! 12 lit over 1C lit + ! drop
+dup 38 lit + @  over 30 lit + @  2 lit pick 1C lit + @  wkeysk
+43 lit 0 lit do  dup 30 lit + @ i 20 lit * +  over 34 lit + @ i 20 lit * +  F lit  3 lit pick 1C lit + @  wchain  loop
+dup  dup 34 lit + @  32 lit 0 lit  txaddin
+
+\ 2 outputs (added out of canonical order; finalize sorts them)
+dup 34 lit + @  77000000 lit over ! 1 lit over 4 lit + ! 2 lit over 8 lit + ! 3 lit over C lit + ! 4 lit over 10 lit + ! 5 lit over 14 lit + ! 6 lit over 18 lit + ! 7 lit over 1C lit + !
+1 lit pick 1 lit pick 50 lit 0 lit txaddout drop
+dup 34 lit + @  33000000 lit over ! 1 lit over 4 lit + ! 2 lit over 8 lit + ! 3 lit over C lit + ! 4 lit over 10 lit + ! 5 lit over 14 lit + ! 6 lit over 18 lit + ! 7 lit over 1C lit + !
+1 lit pick 1 lit pick 3C lit 0 lit txaddout drop
+
+\ finalize (sort inputs by pubkey + outputs by record, compute body_hash)
+dup txfin
+
+\ sign with both secret keys
+dup  dup 2C lit + @  txsign
+dup  dup 30 lit + @  txsign
+
+\ valid1: the signed tx validates
+"valid1=" puts  dup txvalid ph8
+
+\ serialize -> buf, deserialize into a fresh context t2, validate t2
+2400 lit alloc  1 lit pick 1 lit pick txenc
+"len=" puts  ph8
+44 lit alloc  0 lit over !  0 lit over 4 lit + !
+50 lit alloc over 8 lit + !  10D0 lit alloc over C lit + !  10C0 lit alloc over 10 lit + !
+20 lit alloc over 14 lit + !  B0 lit alloc over 18 lit + !  A0 lit alloc over 1C lit + !
+50 lit alloc over 20 lit + !  110 lit alloc over 24 lit + !  870 lit alloc over 28 lit + !
+"decflag=" puts  1 lit pick over txdec  ph8
+"valid2=" puts  dup txvalid ph8
+bye
