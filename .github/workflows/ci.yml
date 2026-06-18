@@ -52,6 +52,8 @@ jobs:
           - test_wotsp          # WOTS+ over Poseidon2-BabyBear-16: keygen/sign/verify round-trip + tamper reject (rv32i + rv32im)
           - test_tx             # Transactions: body_hash + commitment + sign/validate + tamper reject (rv32i + rv32im)
           - test_merkle         # Merkle: Poseidon2 path-verify (compress2) vs reference + accept/reject (rv32i, mul-free)
+          - test_bb4            # BB4: BabyBear quartic ext F_p[x]/(x^4-11) add/sub/smul/mul/inv vs reference (rv32i, mul-free)
+          - test_frifold        # FRI fold: radix-8 IFFT8/Horner fold over BB4 vs reference (cross-checked vs Lagrange) (rv32i)
     steps:
       - name: Checkout
         uses: actions/checkout@v5

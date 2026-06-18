@@ -1,0 +1,21 @@
+#!/bin/sh
+# Radix-8 FRI fold step over BabyBear BB4 (src/frifold.fam): fold f on a size-8
+# coset s*<w8> into P(beta) for the degree-<8 interpolant P, via the iDFT form
+# eval_out = (1/8) * sum_m coeffs[m]*x^m, x = beta*s_inv. The ff0 test checks the
+# fold against the Python reference (tmp/pos2/frifoldref.py), which is itself
+# cross-checked against brute-force Lagrange interpolation. Mul-free (pos2_i /
+# fmul_i path) so it runs on rv32i (the verifier env).
+set -e
+exec </dev/null
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+[ -f bin/fam ] || build_fam
+
+echo "--- frifold (rv32i, mul-free): radix-8 fold vs reference (cross-checked vs Lagrange) ---"
+out=$(timeout 120 ./tools/fam --test src/babybear.fam src/bb4.fam src/frifold.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: frifold tests exited non-zero (or timed out)"; exit 1; }
+echo "$out"
+echo "$out" | grep -q 'test ff0' || { echo "FAIL: fold test (ff0) did not run"; exit 1; }
+echo "$out" | grep -qE '[1-9][0-9]* passed' || { echo "FAIL: no tests ran (silent compile failure?)"; exit 1; }
+
+echo "test_frifold: PASS"

@@ -87,6 +87,8 @@ run bin/full_node.bin \
 	src/wotsp.fam \
 	src/tx.fam \
 	src/merkle.fam \
+	src/bb4.fam \
+	src/frifold.fam \
 	src/disk.fam \
 	src/net.fam \
 	src/node_serve.fam \
