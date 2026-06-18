@@ -13,7 +13,7 @@ exec </dev/null
 setup_qemu
 [ -f bin/fam ] || build_fam
 
-echo "--- pow (rv32i): memory-hard hash (Poseidon2, 32 rounds) vs reference ---"
+echo "--- pow (rv32i): memory-hard hash (Poseidon2 seed + 128-round field-add walk) vs reference ---"
 out=$(timeout 120 ./tools/fam --test src/babybear.fam src/poseidon2.fam src/wotsp.fam src/pow.fam 2>&1) \
     || { echo "$out"; echo "FAIL: pow tests exited non-zero (or timed out)"; exit 1; }
 echo "$out"
