@@ -56,6 +56,7 @@ jobs:
           - test_frifold        # FRI fold: radix-8 IFFT8/Horner fold over BB4 vs reference (cross-checked vs Lagrange) (rv32i)
           - test_transcript     # FRI transcript: Poseidon2-BabyBear duplex sponge absorb/squeeze (beta + query pos) vs reference (rv32i)
           - test_frivfy         # FRI verify loop: radix-8 verify accepts honest proof + rejects tampered vs reference (rv32i)
+          - test_pow            # PoW: memory-hard hash (Poseidon2-BabyBear, 32 rounds) vs reference (rv32i)
     steps:
       - name: Checkout
         uses: actions/checkout@v5

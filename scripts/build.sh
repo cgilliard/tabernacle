@@ -91,6 +91,7 @@ run bin/full_node.bin \
 	src/frifold.fam \
 	src/transcript.fam \
 	src/frivfy.fam \
+	src/pow.fam \
 	src/disk.fam \
 	src/net.fam \
 	src/node_serve.fam \

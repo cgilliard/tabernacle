@@ -1,0 +1,22 @@
+#!/bin/sh
+# Memory-hard proof-of-work hash (src/pow.fam): Poseidon2-BabyBear, 32 rounds.
+# powhash recomputes a block header's PoW hash = p2hash(header) then 32x
+# { idx = state[0] & mask; state = compress2(state, slot_hashes[idx]) } against
+# the pre-expanded bible slot-hash table. The pow0 test checks it against the
+# Python reference (tmp/pos2/powref.py). Built on p2hash + wcompr2 (mul-free),
+# runs on rv32i (the verifier env). (Difficulty/target compare is a separate
+# header-layer concern, not yet specified.)
+set -e
+exec </dev/null
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+[ -f bin/fam ] || build_fam
+
+echo "--- pow (rv32i): memory-hard hash (Poseidon2, 32 rounds) vs reference ---"
+out=$(timeout 120 ./tools/fam --test src/babybear.fam src/poseidon2.fam src/wotsp.fam src/pow.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: pow tests exited non-zero (or timed out)"; exit 1; }
+echo "$out"
+echo "$out" | grep -q 'test pow0' || { echo "FAIL: PoW hash test (pow0) did not run"; exit 1; }
+echo "$out" | grep -qE '[1-9][0-9]* passed' || { echo "FAIL: no tests ran (silent compile failure?)"; exit 1; }
+
+echo "test_pow: PASS"
