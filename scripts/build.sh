@@ -89,6 +89,8 @@ run bin/full_node.bin \
 	src/merkle.fam \
 	src/bb4.fam \
 	src/frifold.fam \
+	src/transcript.fam \
+	src/frivfy.fam \
 	src/disk.fam \
 	src/net.fam \
 	src/node_serve.fam \

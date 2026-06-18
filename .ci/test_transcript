@@ -1,0 +1,20 @@
+#!/bin/sh
+# FRI transcript / Fiat-Shamir (src/transcript.fam): incremental duplex sponge over
+# Poseidon2-BabyBear-16 (additive absorb rate-8, forward squeeze) — absorb round
+# roots, squeeze BB4 fold challenges + query positions. The tr0 test runs an
+# absorb/squeeze/absorb/squeeze sequence and checks beta + two query positions
+# against the Python reference (tmp/pos2/trref.py). Mul-free, runs on rv32i.
+set -e
+exec </dev/null
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+[ -f bin/fam ] || build_fam
+
+echo "--- transcript (rv32i): duplex sponge absorb/squeeze vs reference ---"
+out=$(timeout 120 ./tools/fam --test src/babybear.fam src/poseidon2.fam src/bb4.fam src/transcript.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: transcript tests exited non-zero (or timed out)"; exit 1; }
+echo "$out"
+echo "$out" | grep -q 'test tr0' || { echo "FAIL: transcript test (tr0) did not run"; exit 1; }
+echo "$out" | grep -qE '[1-9][0-9]* passed' || { echo "FAIL: no tests ran (silent compile failure?)"; exit 1; }
+
+echo "test_transcript: PASS"

@@ -1,0 +1,574 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ src/frivfy.fam — radix-8 FRI verify loop (Stage 5, the capstone). Built on
+\ bb4.fam (fpow/finv/cp4/cmp4), frifold.fam (frifold), transcript.fam (tr_*),
+\ merkle.fam (mrkroot), poseidon2.fam (p2hash). Compile AFTER all of those.
+\ Python prover+verifier reference (the spec): tmp/pos2/frivfyref.py.
+\
+\ frivfy ( proof params st -- flag )  flag=1 accept / 0 reject.
+\   proof  = flat word array: roots[R*8] | final[Nfinal*4] | per (qi,r): evals[8 BB4=32w] path[depth_r*8w]
+\   params = K(log2_n) | R(nrounds) | NQ(nqueries) | Nfinal | wNr[R]
+\   st     = scratch >= 0x400, state struct:
+\     +00 proof +04 params +08 cursor +0C idx +10 K +14 R +18 NQ +1C Nfinal
+\     +20 flag  +24 r(loop) +28 qi(loop)
+\     +30 v(16) +40 digest(32) +60 rootc(32) +80 vnew(16) +90 sinv
+\     +A0 betas(R*16) +120 trctx(0xA0) +1C0 p2scr(0xA0) +260 mkscr(0x80) +2E0 ffscr(0xF0)
+\     +3D0 idxr +3D4 L +3D8 m +3DC depth
+\ ──────────────────────────────────────────────────────────────────────────────
+
+: bitrev ( x nbits -- r )
+  0 lit swap 0 lit do
+    over 1 lit and  swap 1 lit lshift +  swap 1 lit rshift swap
+  loop  nip ;
+
+: frsinv ( wNr L nbits -- s_inv )  bitrev fpow finv ;
+
+: fv_setup ( proof params st -- st )
+  2 lit pick 1 lit pick !
+  1 lit pick 1 lit pick 4 lit + !
+  1 lit pick @           1 lit pick 10 lit + !
+  1 lit pick 4 lit + @   1 lit pick 14 lit + !
+  1 lit pick 8 lit + @   1 lit pick 18 lit + !
+  1 lit pick C lit + @   1 lit pick 1C lit + !
+  1 lit 1 lit pick 20 lit + !
+  dup 120 lit + tr_init
+  nip nip ;
+
+: fv_comm ( st -- )
+  0 lit over 24 lit + !
+  begin dup 24 lit + @ over 14 lit + @ u< while
+    dup @  over 24 lit + @ 5 lit lshift +  over 120 lit + swap tr_abs8
+    dup 120 lit +  over A0 lit + 2 lit pick 24 lit + @ 4 lit lshift +  tr_sqbb4
+    dup 24 lit + dup @ 1 lit + swap !
+  repeat
+  0 lit over 24 lit + !
+  begin dup 24 lit + @ over 1C lit + @ 1 lit rshift u< while
+    dup @  over 14 lit + @ 5 lit lshift +  over 24 lit + @ 5 lit lshift +
+    over 120 lit + swap tr_abs8
+    dup 24 lit + dup @ 1 lit + swap !
+  repeat
+  drop ;
+
+: fv_round ( st -- )
+  dup C lit + @  over 24 lit + @ 3 lit * rshift  over 3D0 lit + !
+  dup 3D0 lit + @ 3 lit rshift  over 3D4 lit + !
+  dup 3D0 lit + @ 7 lit and     over 3D8 lit + !
+  dup 10 lit + @ 3 lit -  over 24 lit + @ 3 lit * -  over 3DC lit + !
+  dup 8 lit + @  20 lit  2 lit pick 40 lit +  3 lit pick 1C0 lit +  p2hash
+  dup 40 lit +  1 lit pick 8 lit + @ 80 lit +  2 lit pick 3D4 lit + @  3 lit pick 3DC lit + @  4 lit pick 60 lit +  5 lit pick 260 lit +  mrkroot
+  dup 60 lit +  1 lit pick @ 2 lit pick 24 lit + @ 5 lit lshift +  cmp8  over 20 lit + @ and over 20 lit + !
+  dup 24 lit + @ if
+    dup 30 lit +  1 lit pick 8 lit + @ 2 lit pick 3D8 lit + @ 4 lit lshift +  cmp4  over 20 lit + @ and over 20 lit + !
+  then
+  dup 4 lit + @  over 24 lit + @ 4 lit * + 10 lit + @  over 3D4 lit + @  2 lit pick 3DC lit + @  frsinv  over 90 lit + !
+  dup 8 lit + @  1 lit pick 90 lit + @  2 lit pick A0 lit + 3 lit pick 24 lit + @ 4 lit lshift +  3 lit pick 80 lit +  4 lit pick 2E0 lit +  frifold
+  dup 80 lit + over 30 lit + cp4
+  dup 8 lit + dup @  2 lit pick 3DC lit + @ 5 lit lshift 80 lit + +  swap !
+  drop ;
+
+: fv_final ( st -- )
+  dup C lit + @  over 14 lit + @ 3 lit * rshift  over 3D0 lit + !
+  dup 30 lit +
+  1 lit pick @  2 lit pick 14 lit + @ 5 lit lshift +  2 lit pick 3D0 lit + @ 4 lit lshift +
+  cmp4  over 20 lit + @ and over 20 lit + !
+  drop ;
+
+: fv_query ( st -- )
+  0 lit over 24 lit + !
+  begin dup 24 lit + @ over 14 lit + @ u< while
+    dup fv_round
+    dup 24 lit + dup @ 1 lit + swap !
+  repeat
+  dup fv_final
+  drop ;
+
+: fv_qall ( st -- )
+  dup @  over 14 lit + @ 5 lit lshift +  over 1C lit + @ 4 lit lshift +  over 8 lit + !
+  0 lit over 28 lit + !
+  begin dup 28 lit + @ over 18 lit + @ u< while
+    dup 120 lit +  over 10 lit + @ 1 lit swap lshift 1 lit -  tr_sqidx  over C lit + !
+    dup fv_query
+    dup 28 lit + dup @ 1 lit + swap !
+  repeat
+  drop ;
+
+: frivfy ( proof params st -- flag )
+  fv_setup
+  dup fv_comm
+  dup fv_qall
+  20 lit + @ ;
+
+
+
+Test {
+fv_e2e {
+  800 lit alloc
+  5D870F38 lit over !
+  47B8F118 lit over 4 lit + !
+  0E361574 lit over 8 lit + !
+  6C149841 lit over C lit + !
+  46152B62 lit over 10 lit + !
+  007C80FD lit over 14 lit + !
+  22DC8E1B lit over 18 lit + !
+  651EC4FA lit over 1C lit + !
+  2F6E07D3 lit over 20 lit + !
+  06A59E7C lit over 24 lit + !
+  6EDADA7B lit over 28 lit + !
+  5AA6C1E8 lit over 2C lit + !
+  118F2646 lit over 30 lit + !
+  4F0BB760 lit over 34 lit + !
+  1391C1DB lit over 38 lit + !
+  2660DB62 lit over 3C lit + !
+  219CC44D lit over 40 lit + !
+  536448C6 lit over 44 lit + !
+  64C4AD0F lit over 48 lit + !
+  240217E0 lit over 4C lit + !
+  219CC44D lit over 50 lit + !
+  536448C6 lit over 54 lit + !
+  64C4AD0F lit over 58 lit + !
+  240217E0 lit over 5C lit + !
+  219CC44D lit over 60 lit + !
+  536448C6 lit over 64 lit + !
+  64C4AD0F lit over 68 lit + !
+  240217E0 lit over 6C lit + !
+  219CC44D lit over 70 lit + !
+  536448C6 lit over 74 lit + !
+  64C4AD0F lit over 78 lit + !
+  240217E0 lit over 7C lit + !
+  219CC44D lit over 80 lit + !
+  536448C6 lit over 84 lit + !
+  64C4AD0F lit over 88 lit + !
+  240217E0 lit over 8C lit + !
+  219CC44D lit over 90 lit + !
+  536448C6 lit over 94 lit + !
+  64C4AD0F lit over 98 lit + !
+  240217E0 lit over 9C lit + !
+  219CC44D lit over A0 lit + !
+  536448C6 lit over A4 lit + !
+  64C4AD0F lit over A8 lit + !
+  240217E0 lit over AC lit + !
+  219CC44D lit over B0 lit + !
+  536448C6 lit over B4 lit + !
+  64C4AD0F lit over B8 lit + !
+  240217E0 lit over BC lit + !
+  39E88008 lit over C0 lit + !
+  486AB35D lit over C4 lit + !
+  56ECE6B2 lit over C8 lit + !
+  656F1A07 lit over CC lit + !
+  6FBC8EF2 lit over D0 lit + !
+  28614616 lit over D4 lit + !
+  5905FD3B lit over D8 lit + !
+  11AAB45F lit over DC lit + !
+  0E1F9464 lit over E0 lit + !
+  5232E886 lit over E4 lit + !
+  1E463CA7 lit over E8 lit + !
+  625990C9 lit over EC lit + !
+  2122E879 lit over F0 lit + !
+  1BD5CE92 lit over F4 lit + !
+  1688B4AB lit over F8 lit + !
+  113B9AC4 lit over FC lit + !
+  6D208334 lit over 100 lit + !
+  6B0FE02B lit over 104 lit + !
+  68FF3D22 lit over 108 lit + !
+  66EE9A19 lit over 10C lit + !
+  31C12C59 lit over 110 lit + !
+  5725C71A lit over 114 lit + !
+  048A61DA lit over 118 lit + !
+  29EEFC9B lit over 11C lit + !
+  2B73C6C6 lit over 120 lit + !
+  0A98C82F lit over 124 lit + !
+  61BDC999 lit over 128 lit + !
+  40E2CB02 lit over 12C lit + !
+  0C1B4068 lit over 130 lit + !
+  2FF61600 lit over 134 lit + !
+  53D0EB98 lit over 138 lit + !
+  77ABC130 lit over 13C lit + !
+  2A626C36 lit over 140 lit + !
+  64D02C36 lit over 144 lit + !
+  150F064D lit over 148 lit + !
+  5F9A7241 lit over 14C lit + !
+  27E5F5A4 lit over 150 lit + !
+  07E83EC8 lit over 154 lit + !
+  7175D7D4 lit over 158 lit + !
+  4D631E37 lit over 15C lit + !
+  4913C400 lit over 160 lit + !
+  6DF6C109 lit over 164 lit + !
+  59834BB0 lit over 168 lit + !
+  3023293B lit over 16C lit + !
+  777BC442 lit over 170 lit + !
+  1C309D6F lit over 174 lit + !
+  5508FBDC lit over 178 lit + !
+  48D6A2FD lit over 17C lit + !
+  6074E532 lit over 180 lit + !
+  2CE56078 lit over 184 lit + !
+  102C1F64 lit over 188 lit + !
+  386D387B lit over 18C lit + !
+  6B10888F lit over 190 lit + !
+  65C0D68A lit over 194 lit + !
+  45A043F8 lit over 198 lit + !
+  23155A58 lit over 19C lit + !
+  2A1677B9 lit over 1A0 lit + !
+  5C7E147A lit over 1A4 lit + !
+  63A70BB4 lit over 1A8 lit + !
+  554609F8 lit over 1AC lit + !
+  4049C925 lit over 1B0 lit + !
+  07872577 lit over 1B4 lit + !
+  3ADC6CCB lit over 1B8 lit + !
+  410C1819 lit over 1BC lit + !
+  759BEDC5 lit over 1C0 lit + !
+  598CBC9F lit over 1C4 lit + !
+  55730CC4 lit over 1C8 lit + !
+  6EBEC259 lit over 1CC lit + !
+  2D5D03C2 lit over 1D0 lit + !
+  73FF8774 lit over 1D4 lit + !
+  3A88B7C4 lit over 1D8 lit + !
+  11096EF6 lit over 1DC lit + !
+  6F753987 lit over 1E0 lit + !
+  562E9BE0 lit over 1E4 lit + !
+  4A8B6E30 lit over 1E8 lit + !
+  6AE1C821 lit over 1EC lit + !
+  70950187 lit over 1F0 lit + !
+  1858BE00 lit over 1F4 lit + !
+  24355626 lit over 1F8 lit + !
+  71FA4379 lit over 1FC lit + !
+  1F87E2BF lit over 200 lit + !
+  66DC9993 lit over 204 lit + !
+  610FF804 lit over 208 lit + !
+  0FCAAE99 lit over 20C lit + !
+  3C347B2D lit over 210 lit + !
+  6A6118AB lit over 214 lit + !
+  577687E9 lit over 218 lit + !
+  42C59478 lit over 21C lit + !
+  4999D9E4 lit over 220 lit + !
+  6A4E13A5 lit over 224 lit + !
+  2DFEE0B7 lit over 228 lit + !
+  1E490DA7 lit over 22C lit + !
+  2EC24792 lit over 230 lit + !
+  2B2CB10B lit over 234 lit + !
+  655D2957 lit over 238 lit + !
+  086A6149 lit over 23C lit + !
+  19A79E50 lit over 240 lit + !
+  4E241342 lit over 244 lit + !
+  2F04B82F lit over 248 lit + !
+  10045D5E lit over 24C lit + !
+  2E41D583 lit over 250 lit + !
+  0709C1BD lit over 254 lit + !
+  401922C9 lit over 258 lit + !
+  56279B8E lit over 25C lit + !
+  3603E0DC lit over 260 lit + !
+  13860114 lit over 264 lit + !
+  195D0BB3 lit over 268 lit + !
+  4835850D lit over 26C lit + !
+  1D368B70 lit over 270 lit + !
+  0E97A55E lit over 274 lit + !
+  5CE3CAED lit over 278 lit + !
+  6E701172 lit over 27C lit + !
+  0DC90578 lit over 280 lit + !
+  72307E6C lit over 284 lit + !
+  27ECD80E lit over 288 lit + !
+  17587FD0 lit over 28C lit + !
+  2D04FCE8 lit over 290 lit + !
+  2E3F4ECE lit over 294 lit + !
+  45509E11 lit over 298 lit + !
+  0D9593DC lit over 29C lit + !
+  2F0430CB lit over 2A0 lit + !
+  0264B266 lit over 2A4 lit + !
+  0ACBAF7B lit over 2A8 lit + !
+  69482126 lit over 2AC lit + !
+  2F0FD3E0 lit over 2B0 lit + !
+  08BF6FF5 lit over 2B4 lit + !
+  58704C85 lit over 2B8 lit + !
+  58AA3DD8 lit over 2BC lit + !
+  4BA3A40C lit over 2C0 lit + !
+  3ACDC54C lit over 2C4 lit + !
+  2B1117DB lit over 2C8 lit + !
+  5BB66183 lit over 2CC lit + !
+  0357012D lit over 2D0 lit + !
+  27572A45 lit over 2D4 lit + !
+  5F366878 lit over 2D8 lit + !
+  282D83B2 lit over 2DC lit + !
+  6BEFD7D2 lit over 2E0 lit + !
+  51019996 lit over 2E4 lit + !
+  36135B5A lit over 2E8 lit + !
+  1B251D1E lit over 2EC lit + !
+  44DF41C5 lit over 2F0 lit + !
+  70F2DE8F lit over 2F4 lit + !
+  25067B58 lit over 2F8 lit + !
+  511A1822 lit over 2FC lit + !
+  2D551A49 lit over 300 lit + !
+  4989CE4C lit over 304 lit + !
+  65BE824F lit over 308 lit + !
+  09F33651 lit over 30C lit + !
+  71810B98 lit over 310 lit + !
+  53D4193C lit over 314 lit + !
+  362726E0 lit over 318 lit + !
+  187A3484 lit over 31C lit + !
+  644A01B8 lit over 320 lit + !
+  4FC74F63 lit over 324 lit + !
+  3B449D0E lit over 328 lit + !
+  26C1EAB9 lit over 32C lit + !
+  2C328D3C lit over 330 lit + !
+  1F78BF7D lit over 334 lit + !
+  12BEF1BE lit over 338 lit + !
+  060523FF lit over 33C lit + !
+  1E762160 lit over 340 lit + !
+  0F9D3EFA lit over 344 lit + !
+  00C45C94 lit over 348 lit + !
+  69EB7A2F lit over 34C lit + !
+  31DF4E63 lit over 350 lit + !
+  25FB8435 lit over 354 lit + !
+  1A17BA07 lit over 358 lit + !
+  0E33EFD9 lit over 35C lit + !
+  5824C4F1 lit over 360 lit + !
+  2FCB97FB lit over 364 lit + !
+  4EACAF77 lit over 368 lit + !
+  5308F6B9 lit over 36C lit + !
+  20183068 lit over 370 lit + !
+  2BFB0847 lit over 374 lit + !
+  2D346B34 lit over 378 lit + !
+  61807A07 lit over 37C lit + !
+  2BED6F7D lit over 380 lit + !
+  6CFEDA84 lit over 384 lit + !
+  2A99631C lit over 388 lit + !
+  064BB546 lit over 38C lit + !
+  2350409B lit over 390 lit + !
+  058F77D8 lit over 394 lit + !
+  15200339 lit over 398 lit + !
+  0E4B8157 lit over 39C lit + !
+  04970245 lit over 3A0 lit + !
+  49D53234 lit over 3A4 lit + !
+  3B5C056A lit over 3A8 lit + !
+  400255EF lit over 3AC lit + !
+  52F8D619 lit over 3B0 lit + !
+  2FFDF524 lit over 3B4 lit + !
+  61363253 lit over 3B8 lit + !
+  518A0A64 lit over 3BC lit + !
+  2A1677B9 lit over 3C0 lit + !
+  5C7E147A lit over 3C4 lit + !
+  63A70BB4 lit over 3C8 lit + !
+  554609F8 lit over 3CC lit + !
+  4049C925 lit over 3D0 lit + !
+  07872577 lit over 3D4 lit + !
+  3ADC6CCB lit over 3D8 lit + !
+  410C1819 lit over 3DC lit + !
+  759BEDC5 lit over 3E0 lit + !
+  598CBC9F lit over 3E4 lit + !
+  55730CC4 lit over 3E8 lit + !
+  6EBEC259 lit over 3EC lit + !
+  2D5D03C2 lit over 3F0 lit + !
+  73FF8774 lit over 3F4 lit + !
+  3A88B7C4 lit over 3F8 lit + !
+  11096EF6 lit over 3FC lit + !
+  6F753987 lit over 400 lit + !
+  562E9BE0 lit over 404 lit + !
+  4A8B6E30 lit over 408 lit + !
+  6AE1C821 lit over 40C lit + !
+  70950187 lit over 410 lit + !
+  1858BE00 lit over 414 lit + !
+  24355626 lit over 418 lit + !
+  71FA4379 lit over 41C lit + !
+  1F87E2BF lit over 420 lit + !
+  66DC9993 lit over 424 lit + !
+  610FF804 lit over 428 lit + !
+  0FCAAE99 lit over 42C lit + !
+  3C347B2D lit over 430 lit + !
+  6A6118AB lit over 434 lit + !
+  577687E9 lit over 438 lit + !
+  42C59478 lit over 43C lit + !
+  4999D9E4 lit over 440 lit + !
+  6A4E13A5 lit over 444 lit + !
+  2DFEE0B7 lit over 448 lit + !
+  1E490DA7 lit over 44C lit + !
+  2EC24792 lit over 450 lit + !
+  2B2CB10B lit over 454 lit + !
+  655D2957 lit over 458 lit + !
+  086A6149 lit over 45C lit + !
+  19A79E50 lit over 460 lit + !
+  4E241342 lit over 464 lit + !
+  2F04B82F lit over 468 lit + !
+  10045D5E lit over 46C lit + !
+  2E41D583 lit over 470 lit + !
+  0709C1BD lit over 474 lit + !
+  401922C9 lit over 478 lit + !
+  56279B8E lit over 47C lit + !
+  3603E0DC lit over 480 lit + !
+  13860114 lit over 484 lit + !
+  195D0BB3 lit over 488 lit + !
+  4835850D lit over 48C lit + !
+  1D368B70 lit over 490 lit + !
+  0E97A55E lit over 494 lit + !
+  5CE3CAED lit over 498 lit + !
+  6E701172 lit over 49C lit + !
+  0DC90578 lit over 4A0 lit + !
+  72307E6C lit over 4A4 lit + !
+  27ECD80E lit over 4A8 lit + !
+  17587FD0 lit over 4AC lit + !
+  2D04FCE8 lit over 4B0 lit + !
+  2E3F4ECE lit over 4B4 lit + !
+  45509E11 lit over 4B8 lit + !
+  0D9593DC lit over 4BC lit + !
+  2F0430CB lit over 4C0 lit + !
+  0264B266 lit over 4C4 lit + !
+  0ACBAF7B lit over 4C8 lit + !
+  69482126 lit over 4CC lit + !
+  2F0FD3E0 lit over 4D0 lit + !
+  08BF6FF5 lit over 4D4 lit + !
+  58704C85 lit over 4D8 lit + !
+  58AA3DD8 lit over 4DC lit + !
+  4BA3A40C lit over 4E0 lit + !
+  3ACDC54C lit over 4E4 lit + !
+  2B1117DB lit over 4E8 lit + !
+  5BB66183 lit over 4EC lit + !
+  0357012D lit over 4F0 lit + !
+  27572A45 lit over 4F4 lit + !
+  5F366878 lit over 4F8 lit + !
+  282D83B2 lit over 4FC lit + !
+  078E2904 lit over 500 lit + !
+  0DD0A8E8 lit over 504 lit + !
+  141328CC lit over 508 lit + !
+  1A55A8B0 lit over 50C lit + !
+  1384CE13 lit over 510 lit + !
+  0EC197CD lit over 514 lit + !
+  09FE6187 lit over 518 lit + !
+  053B2B41 lit over 51C lit + !
+  03722973 lit over 520 lit + !
+  4D065E96 lit over 524 lit + !
+  1E9A93B8 lit over 528 lit + !
+  682EC8DB lit over 52C lit + !
+  656BF72A lit over 530 lit + !
+  2A217F82 lit over 534 lit + !
+  66D707DB lit over 538 lit + !
+  2B8C9033 lit over 53C lit + !
+  007E1282 lit over 540 lit + !
+  3A1BB1B3 lit over 544 lit + !
+  73B950E4 lit over 548 lit + !
+  3556F014 lit over 54C lit + !
+  3E0B41E8 lit over 550 lit + !
+  3079FCD1 lit over 554 lit + !
+  22E8B7BA lit over 558 lit + !
+  155772A3 lit over 55C lit + !
+  67F9FBAC lit over 560 lit + !
+  66C9C519 lit over 564 lit + !
+  65998E86 lit over 568 lit + !
+  646957F3 lit over 56C lit + !
+  074CF98C lit over 570 lit + !
+  5AC5DAE8 lit over 574 lit + !
+  363EBC43 lit over 578 lit + !
+  11B79D9E lit over 57C lit + !
+  0A3B35C9 lit over 580 lit + !
+  5A0ED4B3 lit over 584 lit + !
+  312A0BCF lit over 588 lit + !
+  44403BD6 lit over 58C lit + !
+  4830D2AF lit over 590 lit + !
+  355F7B26 lit over 594 lit + !
+  4FE0BC69 lit over 598 lit + !
+  691B074D lit over 59C lit + !
+  47D29C5A lit over 5A0 lit + !
+  34D17864 lit over 5A4 lit + !
+  6E53995B lit over 5A8 lit + !
+  2544BDF3 lit over 5AC lit + !
+  176AFED6 lit over 5B0 lit + !
+  03A53809 lit over 5B4 lit + !
+  23240969 lit over 5B8 lit + !
+  3DF3C612 lit over 5BC lit + !
+  1A7F83C5 lit over 5C0 lit + !
+  011C9E84 lit over 5C4 lit + !
+  5B087308 lit over 5C8 lit + !
+  1547D9AC lit over 5CC lit + !
+  4B3198DA lit over 5D0 lit + !
+  5DA002AF lit over 5D4 lit + !
+  1AA80B06 lit over 5D8 lit + !
+  5A0EE86A lit over 5DC lit + !
+  2720515C lit over 5E0 lit + !
+  633A1305 lit over 5E4 lit + !
+  68505AB8 lit over 5E8 lit + !
+  6C30655A lit over 5EC lit + !
+  0CA7D986 lit over 5F0 lit + !
+  51A5AD2C lit over 5F4 lit + !
+  2AEA22B2 lit over 5F8 lit + !
+  152C6EC2 lit over 5FC lit + !
+  3FA7851D lit over 600 lit + !
+  6FC0F027 lit over 604 lit + !
+  392E4459 lit over 608 lit + !
+  02DDF506 lit over 60C lit + !
+  2505A223 lit over 610 lit + !
+  1C91B04A lit over 614 lit + !
+  4EB5E368 lit over 618 lit + !
+  4BC4F21C lit over 61C lit + !
+  39C420AB lit over 620 lit + !
+  130EC06A lit over 624 lit + !
+  48BC9FCA lit over 628 lit + !
+  035CC645 lit over 62C lit + !
+  345B84AC lit over 630 lit + !
+  16CC7ED5 lit over 634 lit + !
+  5B93FF59 lit over 638 lit + !
+  513E2397 lit over 63C lit + !
+  67A7E275 lit over 640 lit + !
+  5765A1CF lit over 644 lit + !
+  65A4C237 lit over 648 lit + !
+  414C05A3 lit over 64C lit + !
+  6D026054 lit over 650 lit + !
+  51C78CE7 lit over 654 lit + !
+  44D6B084 lit over 658 lit + !
+  00350ABB lit over 65C lit + !
+  55D7E4D3 lit over 660 lit + !
+  4D05AECB lit over 664 lit + !
+  7117AE80 lit over 668 lit + !
+  2EBCBA1D lit over 66C lit + !
+  2A953617 lit over 670 lit + !
+  5492B948 lit over 674 lit + !
+  753087EF lit over 678 lit + !
+  5E5C51A1 lit over 67C lit + !
+  54DBF9DE lit over 680 lit + !
+  66C7247B lit over 684 lit + !
+  198B77C0 lit over 688 lit + !
+  5F7473C8 lit over 68C lit + !
+  30CDD86F lit over 690 lit + !
+  30B36085 lit over 694 lit + !
+  5AD608A3 lit over 698 lit + !
+  4A3B473D lit over 69C lit + !
+  1C6F6BD1 lit over 6A0 lit + !
+  1387B39D lit over 6A4 lit + !
+  3CF1E425 lit over 6A8 lit + !
+  2F21080C lit over 6AC lit + !
+  680BC3B2 lit over 6B0 lit + !
+  603C22FA lit over 6B4 lit + !
+  672A2DE2 lit over 6B8 lit + !
+  66AA6240 lit over 6BC lit + !
+  66DA8BC7 lit over 6C0 lit + !
+  291093AB lit over 6C4 lit + !
+  1142A8A5 lit over 6C8 lit + !
+  35A322A5 lit over 6CC lit + !
+  63649943 lit over 6D0 lit + !
+  208D0722 lit over 6D4 lit + !
+  2E161136 lit over 6D8 lit + !
+  35ECC92F lit over 6DC lit + !
+  43EAFC18 lit over 6E0 lit + !
+  00BCB5CB lit over 6E4 lit + !
+  5C747FB1 lit over 6E8 lit + !
+  30BB6229 lit over 6EC lit + !
+  003E6BCD lit over 6F0 lit + !
+  15CE2054 lit over 6F4 lit + !
+  16C3040B lit over 6F8 lit + !
+  39B719C5 lit over 6FC lit + !
+  31EA5FB2 lit over 700 lit + !
+  4507EDCC lit over 704 lit + !
+  77940021 lit over 708 lit + !
+  2BF21FE4 lit over 70C lit + !
+  76154AD3 lit over 710 lit + !
+  3BC0F12F lit over 714 lit + !
+  187083BF lit over 718 lit + !
+  33723CCF lit over 71C lit + !
+  20 lit alloc
+  00000009 lit over !
+  00000002 lit over 4 lit + !
+  00000003 lit over 8 lit + !
+  00000008 lit over C lit + !
+  688442F9 lit over 10 lit + !
+  669D6090 lit over 14 lit + !
+  400 lit alloc
+  2 lit pick 2 lit pick 2 lit pick frivfy  1 lit asrt_eq
+  2 lit pick C0 lit +  dup @ 1 lit + swap !
+  2 lit pick 2 lit pick 2 lit pick frivfy  0 lit asrt_eq
+  2drop drop
+}
+}
