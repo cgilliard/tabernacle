@@ -9,7 +9,7 @@ build_fam
 echo "--- node_serve.fam logic tests (disk_step state machine, no device) ---"
 # node_serve depends on the device modules; compile the whole stack so its words
 # (and disk.fam + net.fam Test blocks) resolve.
-out=$(./tools/fam --test src/fence.fam src/disk.fam src/net.fam src/blake2s.fam src/tblexpand.fam src/node_serve.fam 2>&1) \
+out=$(./tools/fam --test src/fence.fam src/babybear.fam src/disk.fam src/net.fam src/blake2s.fam src/tblexpand.fam src/node_serve.fam 2>&1) \
     || { echo "$out"; echo "FAIL: node_serve tests exited non-zero"; exit 1; }
 echo "$out"
 echo "$out" | grep -q 'ds_machine' || { echo "FAIL: disk_step state-machine test did not run"; exit 1; }

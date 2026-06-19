@@ -437,10 +437,10 @@ begin
   5000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
   find_blk over !  vblkinit
   over C lit + !                       \ ctx+C = ds ( ctx )
-  A0 lit alloc over 10 lit + !         \ ctx+10 = scr ( ctx )
+  100 lit alloc over 10 lit + !        \ ctx+10 = scr (>=0x100 for texpand layout)
   \ load expansion from disk, then checksum the whole table
   dup C lit + @  over 8 lit + @  2 lit pick 4 lit + @  732F lit  tbl_load
-  dup @  400000 lit  2 lit pick 10 lit + @  0DFD0DAC lit  tbl_chk
+  dup @  400000 lit  2 lit pick 10 lit + @  9A27A028 lit  tbl_chk
   invert if                            \ checksum miss -> (re)generate + persist
     "powtbl gen\n" puts
     dup @  66880 lit  400000 lit  3 lit pick 10 lit + @  texpand
