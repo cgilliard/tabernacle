@@ -22,6 +22,9 @@ jobs:
   proofs:
     name: ${{ matrix.config.platform }} - ${{ matrix.task }}
     runs-on: ${{ matrix.config.runner }}
+    # Backstop: a wedged job (e.g. apt lock) dies in minutes with logs, instead of
+    # running to the default 360-min limit and tying up a runner.
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
