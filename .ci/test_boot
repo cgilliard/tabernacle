@@ -1,0 +1,56 @@
+#!/bin/sh
+# Full-boot smoke test + PoW-table lifecycle. Seeds a disk with bin/full_node.bin and
+# boots bin/tabernacle from it TWICE on the same disk:
+#   boot 1 (fresh): tabernacle disk-scan + gimli hash-gate + handoff -> full_node
+#     prologue (gp 16 MiB reservation, init) -> powtbl GEN path (texpand the table +
+#     save to disk) -> runsrv "serve".
+#   boot 2 (cached): powtbl LOAD path (read expansion back, full-table checksum OK)
+#     -> "serve".  That boot 2 takes the load path (not re-gen) proves fam texpand
+#     produced the canonical table (matches the committed checksum constant).
+# This is the guard for boot-path + PoW-table changes the per-word --test can't cover.
+# Disk-boot is deterministic; --net brings up the (slirp) virtio-net runsrv needs.
+set -e
+exec </dev/null
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+[ -f bin/fam ] || build_fam
+{ [ -f bin/full_node.bin ] && [ -f bin/tabernacle ]; } || build_fam
+
+img="${TMPDIR:-/tmp}/tab_boot_$$.img"
+trap 'rm -f "$img" "$img.out"' EXIT
+dd if=/dev/zero of="$img" bs=1M count=64 2>/dev/null
+dd if=bin/full_node.bin of="$img" conv=notrunc 2>/dev/null
+
+# boot_until_serve <timeout_s> : boot, poll output for "serve", kill on hit/timeout,
+# print captured output. Kept fast (kills as soon as the node is serving).
+boot_until_serve() {
+  to="$1"; : > "$img.out"
+  ( printf '3737 0 10000 127.0.0.1:3737 127.0.0.1:3737\004' \
+      | timeout "$to" ./tools/q32 bin/tabernacle --disk="$img" --net > "$img.out" 2>&1 ) &
+  bpid=$!; n=0
+  while kill -0 "$bpid" 2>/dev/null; do
+    grep -q serve "$img.out" && break
+    n=$((n + 1)); [ "$n" -ge "$to" ] && break
+    sleep 1
+  done
+  # q32 exec's qemu, so target qemu directly by our unique disk name (killing the
+  # subshell first would orphan qemu -> it keeps the disk locked -> next boot collides).
+  pkill -f "$img" 2>/dev/null || :; kill "$bpid" 2>/dev/null || :; wait "$bpid" 2>/dev/null || :
+  sleep 1                          # let qemu fully exit + release the disk file
+  cat "$img.out"
+}
+
+echo "--- boot 1 (fresh disk): GEN path (texpand + save) -> serve ---"
+o1=$(boot_until_serve 180)
+echo "$o1"
+echo "$o1" | grep -q 'serve'      || { echo "FAIL: boot 1 did not reach serve (boot/hash-gate/handoff/gp broken)"; exit 1; }
+echo "$o1" | grep -q 'powtbl gen' || { echo "FAIL: boot 1 did not take the table GEN path"; exit 1; }
+
+echo "--- boot 2 (cached disk): LOAD path (full-table checksum OK) -> serve ---"
+o2=$(boot_until_serve 90)
+echo "$o2"
+echo "$o2" | grep -q 'serve'     || { echo "FAIL: boot 2 did not reach serve"; exit 1; }
+echo "$o2" | grep -q 'powtbl ok' || { echo "FAIL: boot 2 did not take the LOAD path (texpand mismatch / cache broken)"; exit 1; }
+if echo "$o2" | grep -q 'powtbl gen'; then echo "FAIL: boot 2 re-generated (cache not used)"; exit 1; fi
+
+echo "test_boot: PASS"

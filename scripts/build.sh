@@ -92,6 +92,8 @@ run bin/full_node.bin \
 	src/transcript.fam \
 	src/frivfy.fam \
 	src/pow.fam \
+	src/blake2s.fam \
+	src/tblexpand.fam \
 	src/disk.fam \
 	src/net.fam \
 	src/node_serve.fam \

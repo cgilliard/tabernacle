@@ -16,8 +16,9 @@
 \     scr >= 0xA0 (p2hash scratch; scr[0] reused for acc after the seed).
 \ ROUNDS = 128 (0x80): the walk dwarfs the one-time seed hash so an ASIC stays
 \ memory-bound; even a fast-banked-SRAM build is pushed toward its ~67% floor.
-\ table = NSLOT single-word field entries (NOT 8-word slots), pre-expanded, shipped.
-\ Production mask = 0x7FFFF (524288 slots). Difficulty/target
+\ table = NSLOT single-word field entries (NOT 8-word slots); built off-circuit from
+\ the bible seed by src/tblexpand.fam (chained blake2s), cached on disk.
+\ Production mask = 0x3FFFFF (4Mi slots = 16 MiB). Difficulty/target
 \ compare folds all 8 words (field add) downstream. Python ref: tmp/pos2/powref.py.
 \ ──────────────────────────────────────────────────────────────────────────────
 

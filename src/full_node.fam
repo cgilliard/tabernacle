@@ -20,7 +20,16 @@
 \ and we point the TX descriptors straight at it (no snapshot copy).
 \ This MUST run before any :word call (the first RID push).
 8322C7FD ,   \ lw  t0, -36(a4)   ( t0 = img_size, the bin_size config at img_base-36 )
-B3015700 ,   \ add gp, a4, t0    ( gp = img_base + img_size = first byte past the image )
-init         \ relay RID stack / vars / heap / data stack ABOVE the image
+B3015700 ,   \ add gp, a4, t0    ( gp = img_base + img_size = first byte past the bible )
+\ Reserve the 16 MiB PoW table in place: the bible IS the table's first seedw words,
+\ at [img_base+img_size-BIBLE_SIZE .. img_base+img_size); the 14.4 MiB expansion fills
+\ [end-of-bible .. table_base+16MiB).  Push gp past the whole table so init lays the
+\ runtime ABOVE it (table_base = end-of-bible - BIBLE_SIZE; gp += 16MiB - BIBLE_SIZE).
+\ BIBLE_SIZE = 1,680,243; 16MiB - BIBLE_SIZE = 0xE65C8D.  lui+addi (const >12 bits).
+3763E600 ,   \ lui  t1, 0xE66
+1303D3C8 ,   \ addi t1, t1, -883   ( t1 = 0xE65C8D )
+B3816100 ,   \ add  gp, gp, t1     ( gp = bible_start + 16 MiB )
+init         \ relay RID stack / vars / heap / data stack ABOVE the table
 
+_a4 powtbl   \ build/cache the 16 MiB PoW table in the reserved region (a4 = img_base)
 _a1 _a2 _a3 _a4 runsrv

@@ -401,6 +401,56 @@ begin
 \ ══════════════════════════════════════════════════════════════════════════════
 \ ── runsrv ( bootsrc port dbg img_base -- )  disk-save (net boot) + serve ──
 \ ══════════════════════════════════════════════════════════════════════════════
+\ PoW table: build/cache the 16 MiB table in the region reserved by full_node.fam's
+\ gp bump (just past the bible).  Off-circuit; the table is anchored by its committed
+\ root, so blake2s/checksum here are a fast deterministic expander + cache guard.
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ tbl_load ( ds sectbase mem nsec -- )  blocking: read nsec 512B sectors disk[sectbase..]
+\ into mem[..].  tbl_save: same, writing.  One request at a time (vwrite/vread+vwait).
+: tbl_load ( ds sectbase mem nsec -- )
+  0 lit do
+    2 lit pick  2 lit pick i +  2 lit pick i 200 lit * +  vread  vwait  2drop
+  loop  2drop drop ;
+: tbl_save ( ds sectbase mem nsec -- )
+  0 lit do
+    2 lit pick  2 lit pick i +  2 lit pick i 200 lit * +  vwrite  vwait  2drop
+  loop  2drop                          \ ( ds )
+  vflush                               \ FLUSH device cache to backing store (durable
+  dup FFFFFFFF lit = if 2drop          \ before we return) -- else a kill loses writes.
+  else vwait 2drop then ;              \ 0xFFFFFFFF = writethrough (nothing to wait on)
+
+\ powtbl ( img_base -- )  ensure the PoW table is present in [bible_start..+16MiB).
+\ Geometry: img_size=@(img_base-36); table_base=img_base+img_size-BIBLE_SIZE; the
+\ seed (bible) is already there; expansion mem = table_base+seedw*4; disk sector base
+\ = ceil(img_size/512); expansion = 29487 sectors.  Try disk -> checksum -> on miss,
+\ regenerate (texpand, ~min) + save.  ctx: +0 table_base +4 mem +8 nsec +C ds +10 scr.
+: powtbl ( img_base -- )
+  18 lit alloc swap                    \ ( ctx img_base )
+  dup 24 lit - @                       \ ( ctx img_base img_size )
+  2dup + 19A373 lit -  3 lit pick !            \ ctx+0 = table_base = ib+is-BIBLE_SIZE
+  2 lit pick @ 19A200 lit +  3 lit pick 4 lit + !   \ ctx+4 = mem = table_base + seedw*4
+  dup 1FF lit + 9 lit rshift  3 lit pick 8 lit + !  \ ctx+8 = nsec = ceil(img_size/512)
+  2drop                                \ ( ctx )
+  4C lit alloc                         \ ds ( ctx ds )
+  0 lit over 8 lit + !  0 lit over C lit + !  0 lit over 10 lit + !  0 lit over 44 lit + !
+  5000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+  find_blk over !  vblkinit
+  over C lit + !                       \ ctx+C = ds ( ctx )
+  A0 lit alloc over 10 lit + !         \ ctx+10 = scr ( ctx )
+  \ load expansion from disk, then checksum the whole table
+  dup C lit + @  over 8 lit + @  2 lit pick 4 lit + @  732F lit  tbl_load
+  dup @  400000 lit  2 lit pick 10 lit + @  0DFD0DAC lit  tbl_chk
+  invert if                            \ checksum miss -> (re)generate + persist
+    "powtbl gen\n" puts
+    dup @  66880 lit  400000 lit  3 lit pick 10 lit + @  texpand
+    dup C lit + @  over 8 lit + @  2 lit pick 4 lit + @  732F lit  tbl_save
+  else
+    "powtbl ok\n" puts
+  then
+  drop ;
+
+\ ══════════════════════════════════════════════════════════════════════════════
 \ Public entry of the server module.  full_node.fam captures a2/a3/a4 at top level
 \ (before any : word call can clobber them) and calls this with ( port dbg img_base ).
 : runsrv

@@ -1,0 +1,87 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ src/tblexpand.fam — PoW lookup-table expansion (off-circuit, builds the 16 MiB
+\ table from the bible seed). CHAINED single-block BLAKE2s: table[p..p+8] =
+\ blake2s(table[p-16..p]) (64B window -> 8 words), starting at p=seedw past the
+\ shipped seed. Each block depends on the prior window back to the seed, so a block
+\ can't be recomputed in O(1) (TMTO-resistant); forward gen is ~450k hashes (~min
+\ in QEMU). NOT consensus-trusted — the table is anchored by its committed root;
+\ blake2s is just a fast deterministic expander. Built on src/blake2s.fam.
+\   texpand ( table seedw tblw scr -- )   table[0..seedw) preloaded with seed;
+\     fills words [seedw..tblw). scr >= 0xA0 (blake2s @ scr..+0x80; partial temp @ +0x80).
+\ Production: seedw = len(bible)//4 = 420060, tblw = 0x400000 (16 MiB). Ref: tmp/pos2/tblref.py.
+\ ──────────────────────────────────────────────────────────────────────────────
+
+: texpand ( table seedw tblw scr -- )
+  3 lit pick 3 lit pick 2 lit lshift +     \ op0 = table + seedw*4
+  dup 40 lit - swap                        \ -> ip0 op0   (ip0 = op0 - 64)
+  3 lit pick 5 lit pick - 3 lit rshift     \ nfull = (tblw-seedw) >> 3
+  dup 0 lit > if 0 lit do
+    1 lit pick 40 lit 2 lit pick 5 lit pick blake2s   \ blake2s(ip,64,op,scr)
+    20 lit +  swap 20 lit + swap                       \ op += 32; ip += 32
+  loop else drop then
+  3 lit pick 5 lit pick - 7 lit and        \ rem = (tblw-seedw) & 7
+  dup 0 lit > if
+    2 lit pick 40 lit 5 lit pick 80 lit + 6 lit pick blake2s  \ blake2s(ip,64,scr+0x80,scr)
+    0 lit do
+      2 lit pick 80 lit + i 4 lit * + @  1 lit pick i 4 lit * + !   \ op[i] = temp[i]
+    loop
+  else drop then
+  2drop 2drop 2drop ;
+
+\ tbl_chk ( table tblw scr expect -- flag )  flag = -1 (match) / 0 (mismatch).
+\ Full-table integrity check: a fast
+\ position-sensitive Fletcher checksum over all tblw words (s1+=w; s2+=s1, wrapping;
+\ ck = s1^s2) compared to `expect`. Adds-only -> one cheap pass, OK every boot;
+\ catches disk corruption / wrong table. Consensus integrity is the committed root.
+\ Uses scr[0]=s1, scr[4]=s2 (reuse the blake2s scratch). Production `expect` is a
+\ constant computed once from the canonical 16 MiB table. Ref: tmp/pos2/tblref.py.
+: tbl_chk ( table tblw scr expect -- flag )
+  1 lit pick 0 lit over !  0 lit over 4 lit + !  drop     \ s1=0 ; s2=0
+  2 lit pick 0 lit do
+    3 lit pick i 4 lit * + @          \ w = table[i]
+    2 lit pick @ +                    \ s1 + w
+    dup 3 lit pick !                  \ store s1', keep it
+    2 lit pick 4 lit + @ over +       \ s2 + s1'
+    3 lit pick 4 lit + !  drop        \ store s2'; drop s1'
+  loop
+  1 lit pick @  2 lit pick 4 lit + @  xor   \ ck = s1 ^ s2  (scr@1 then @2 after s1 pushed)
+  over =                                     \ flag = (ck == expect)
+  nip nip nip nip ;
+
+Test {
+tx0 {
+  110 lit alloc
+  01010101 lit over !
+  02020202 lit over 4 lit + !
+  03030303 lit over 8 lit + !
+  04040404 lit over C lit + !
+  05050505 lit over 10 lit + !
+  06060606 lit over 14 lit + !
+  07070707 lit over 18 lit + !
+  08080808 lit over 1C lit + !
+  09090909 lit over 20 lit + !
+  0A0A0A0A lit over 24 lit + !
+  0B0B0B0B lit over 28 lit + !
+  0C0C0C0C lit over 2C lit + !
+  0D0D0D0D lit over 30 lit + !
+  0E0E0E0E lit over 34 lit + !
+  0F0F0F0F lit over 38 lit + !
+  10101010 lit over 3C lit + !
+  A0 lit alloc
+  \ stack: table scr ; texpand(table, 16, 67, scr)
+  1 lit pick 10 lit 43 lit 3 lit pick texpand
+  \ representative checks vs tmp/pos2/tblref.py (first block / boundaries / partial)
+  1 lit pick 40 lit + @  F09BB51F lit asrt_eq
+  1 lit pick 44 lit + @  3D03D409 lit asrt_eq
+  1 lit pick 5C lit + @  022E49C8 lit asrt_eq
+  1 lit pick 60 lit + @  B8763B56 lit asrt_eq
+  1 lit pick E0 lit + @  7E29DA95 lit asrt_eq
+  1 lit pick FC lit + @  53F18675 lit asrt_eq
+  1 lit pick 100 lit + @ 5626336C lit asrt_eq
+  1 lit pick 104 lit + @ 10854C4B lit asrt_eq
+  1 lit pick 108 lit + @ 2F1DCFE4 lit asrt_eq
+  \ full-table checksum over all 67 words == reference (tbl_chk returns -1 on match)
+  1 lit pick 43 lit 2 lit pick CAC43170 lit tbl_chk  FFFFFFFF lit asrt_eq
+  2drop
+}
+}

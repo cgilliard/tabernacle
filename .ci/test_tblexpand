@@ -1,0 +1,22 @@
+#!/bin/sh
+# PoW table expansion (src/tblexpand.fam): builds the 16 MiB PoW lookup table from
+# the bible seed via CHAINED single-block BLAKE2s — table[p..p+8]=blake2s(table[p-16..p]).
+# Off-circuit, not consensus-trusted (the table is anchored by its committed root);
+# blake2s is just a fast deterministic expander. Each block depends on the prior
+# window back to the seed (TMTO-resistant). The tx0 test runs a small seedw=16/tblw=67
+# expansion (6 full blocks + 1 partial) and pins it to tmp/pos2/tblref.py, which is
+# itself self-checked against hashlib.blake2s.
+set -e
+exec </dev/null
+. "$(dirname "$0")/_common.sh"
+setup_qemu
+[ -f bin/fam ] || build_fam
+
+echo "--- tblexpand (rv32i): chained-blake2s PoW table expansion vs reference ---"
+out=$(timeout 120 ./tools/fam --test src/blake2s.fam src/tblexpand.fam 2>&1) \
+    || { echo "$out"; echo "FAIL: tblexpand tests exited non-zero (or timed out)"; exit 1; }
+echo "$out"
+echo "$out" | grep -q 'test tx0' || { echo "FAIL: table-expansion test (tx0) did not run"; exit 1; }
+echo "$out" | grep -qE '[1-9][0-9]* passed' || { echo "FAIL: no tests ran (silent compile failure?)"; exit 1; }
+
+echo "test_tblexpand: PASS"
