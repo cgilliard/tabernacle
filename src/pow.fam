@@ -40,6 +40,49 @@
   loop
   2drop 2drop 2drop ;
 
+\ powlt ( out target -- flag )  -1 iff out < target as a 256-bit number (8 words, out[0]
+\ MOST significant), else 0.  The PoW difficulty test: a hash is valid iff out < target.
+\ 256-bit (~248-bit, words < p) target gives the full difficulty range realistic mining
+\ needs; a single field-element fold would cap difficulty at ~2^31 (way too coarse).
+: powlt ( out target -- flag )
+  0 lit                                        \ res = 0
+  8 lit 0 lit do
+    2 lit pick 7 lit i - 4 lit * + @           \ a = out[7-i]
+    2 lit pick 7 lit i - 4 lit * + @           \ b = target[7-i]
+    2dup u< if 2drop drop FFFFFFFF lit
+    else 2dup swap u< if 2drop drop 0 lit
+    else 2drop then then
+  loop
+  nip nip ;
+
+\ mine ( hdr n table mask target out scr start -- nonce found )  sweep the LAST header
+\ word (nonce = hdr[n-1]) from `start` up to 0xFFFFFFFF until powhash(...) < target
+\ (target = ptr to an 8-word 256-bit threshold). Returns ( winning-nonce -1 ) on a hit
+\ (hdr[n-1] + out hold it) or ( 0xFFFFFFFF 0 ) when the 32-bit nonce space is exhausted
+\ with no hit — the caller then bumps the header's aux-hash field and re-mines (the
+\ extra entropy, Bitcoin-style). `start` enables resume / chunked sweeps. scr>=0xC8.
+\ This fam/QEMU impl is the canonical/reference miner (whole reference impl is fam — no
+\ Rust); a faster miner reimplements the same powhash+mine in hardware (external). Block
+\ production also needs the STARK proof (separate fam work). ctx (9w) carved from scr at
+\ scr+0xA0 (above powhash's 0xA0 region -> NO heap alloc / no per-call leak):
+\   +0 hdr +4 n +8 table +C mask +10 target +14 out +18 scr +1C nonce +20 found.
+: mine ( hdr n table mask target out scr start -- nonce found )
+  over A0 lit +                \ ctx = scr + 0xA0  (scr at depth1; reuse caller scratch, no leak)
+  1 lit pick over 1C lit + !   \ nonce = start
+  2 lit pick over 18 lit + !   3 lit pick over 14 lit + !   4 lit pick over 10 lit + !
+  5 lit pick over C lit + !    6 lit pick over 8 lit + !    7 lit pick over 4 lit + !
+  8 lit pick over !
+  nip nip nip nip nip nip nip nip
+  begin
+    dup @  over 4 lit + @ 1 lit - 2 lit lshift +  over 1C lit + @  swap !   \ hdr[n-1] = nonce
+    dup @  over 4 lit + @  2 lit pick 8 lit + @  3 lit pick C lit + @  4 lit pick 14 lit + @  5 lit pick 18 lit + @  powhash
+    dup 14 lit + @  over 10 lit + @  powlt  over 20 lit + !                 \ found = (out < target); store
+    dup 20 lit + @ 0 lit =  over 1C lit + @ FFFFFFFF lit u<  and            \ keepgoing = !found AND nonce<MAX
+  while
+    dup 1C lit + dup @ 1 lit + swap !                                       \ nonce++
+  repeat
+  dup 20 lit + @  swap 1C lit + @  swap ;                                   \ ( nonce found ) ; found 0 = exhausted
+
 Test {
 pow0 {
   80 lit alloc
@@ -82,7 +125,7 @@ pow0 {
   44444444 lit over C lit + !
   55555555 lit over 10 lit + !
   20 lit alloc
-  A0 lit alloc
+  C8 lit alloc                 \ scr: 0xA0 for powhash + 0x24 for mine's 9-word ctx
   20 lit alloc
   53BB87FC lit over !
   4DAE675E lit over 4 lit + !
@@ -95,6 +138,23 @@ pow0 {
   \ stack: table header out scr eOUT
   3 lit pick  5 lit  6 lit pick  0000001F lit  6 lit pick  6 lit pick  powhash
   2 lit pick 1 lit pick cmp8  1 lit asrt_eq
+  \ build the 256-bit target [0x0F000000, FFFFFFFF x7]  ( -> stack: table header out scr eOUT target )
+  20 lit alloc
+  0F000000 lit over !          FFFFFFFF lit over 4 lit + !
+  FFFFFFFF lit over 8 lit + !  FFFFFFFF lit over C lit + !
+  FFFFFFFF lit over 10 lit + ! FFFFFFFF lit over 14 lit + !
+  FFFFFFFF lit over 18 lit + ! FFFFFFFF lit over 1C lit + !
+  \ FOUND: mine(header,5,table,0x1F,target,out,scr,start=0) -> ( nonce=5  found=-1 )
+  4 lit pick 5 lit 7 lit pick 0000001F lit 4 lit pick 8 lit pick 8 lit pick 0 lit mine
+  FFFFFFFF lit asrt_eq  5 lit asrt_eq
+  \ EXHAUST: refill target = 0 (impossible) ; start near MAX -> ( nonce=FFFFFFFF  found=0 )
+  0 lit over !          0 lit over 4 lit + !
+  0 lit over 8 lit + !  0 lit over C lit + !
+  0 lit over 10 lit + ! 0 lit over 14 lit + !
+  0 lit over 18 lit + ! 0 lit over 1C lit + !
+  4 lit pick 5 lit 7 lit pick 0000001F lit 4 lit pick 8 lit pick 8 lit pick FFFFFFFD lit mine
+  0 lit asrt_eq  FFFFFFFF lit asrt_eq
+  drop
   2drop 2drop drop
 }
 }
