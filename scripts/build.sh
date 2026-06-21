@@ -95,6 +95,8 @@ run bin/full_node.bin \
 	src/blake2s.fam \
 	src/tblexpand.fam \
 	src/disk.fam \
+	src/node_disk_store.fam \
+	src/node_disk_trie.fam \
 	src/net.fam \
 	src/node_serve.fam \
 	src/full_node.fam

@@ -26,8 +26,8 @@
 : pg_of    7FFFFFFF lit and ;          \ ( ptr -- page )  strip the tag
 : tg_leaf  80000000 lit or ;           \ ( page -- ptr )  tag as a leaf pointer
 
-\ ── cp8 ( src dst -- )  copy 32 bytes (8 words) — used for both keys and values ──
-: cp8
+\ ── kvcp8 ( src dst -- )  copy 32 bytes (8 words) — used for both keys and values ──
+: kvcp8
 8 lit 0 lit do
   over i 4 lit * + @ over i 4 lit * + !
 loop
@@ -102,7 +102,7 @@ else
     pg_of 4 lit pick @ swap bp_get     \ framep = bp_get(eng.bp, pg_of(ptr)) ; ( ... level bp framep )
     dup 5 lit pick bk_find             \ vp = bk_find(framep, keyp), keeping framep ( ... bp framep vp )
     dup if
-      4 lit pick cp8                   \ hit: copy the 32-byte value into valp
+      4 lit pick kvcp8                   \ hit: copy the 32-byte value into valp
       FFFFFFFF lit                     \ result = true
     else
       drop 0 lit                       \ miss: result = false
@@ -115,7 +115,7 @@ then
 \ ══════════════════════════════════════════════════════════════════════════════
 \ WRITE PATH (copy-on-write).  A pre-allocated TRIE CONTEXT `tc` carries the state
 \ a write needs so the data stack stays shallow (COW descent + ascend is where stack
-\ juggling otherwise gets error-prone).  tc is allocated ONCE by tr_init and its
+\ juggling otherwise gets error-prone).  tc is allocated ONCE by trie_ini and its
 \ pointer lives in the reserved eng+0x10 slot — no per-op alloc, no change to the
 \ store layer.
 \
@@ -128,9 +128,9 @@ then
 : eng_bp  @ ;                          \ ( eng -- bp )
 : eng_tc  10 lit + @ ;                 \ ( eng -- tc )
 
-\ ── tr_init ( eng -- )  allocate the trie context once; stash eng + bp; publish tc
+\ ── trie_ini ( eng -- )  allocate the trie context once; stash eng + bp; publish tc
 \ in the reserved eng+0x10 slot.  Call after eng_init / mt_boot, before any tr_put. ──
-: tr_init
+: trie_ini
 154 lit alloc                          \ ( eng tc )
 swap over !                            \ tc.eng = eng ; ( tc )
 dup @ eng_bp over 4 lit + !            \ tc.bp = eng.bp
@@ -144,8 +144,8 @@ drop
 2 lit pick pg_new                      \ ( eng keyp valp eng page )
 swap @ over bp_alloc                   \ ( eng keyp valp page bp framep )
 1 lit over !                           \ count = 1
-4 lit pick over 4 lit + cp8            \ cp8(keyp, framep+4)
-3 lit pick over 24 lit + cp8           \ cp8(valp, framep+0x24)
+4 lit pick over 4 lit + kvcp8            \ kvcp8(keyp, framep+4)
+3 lit pick over 24 lit + kvcp8           \ kvcp8(valp, framep+0x24)
 bp_unpin drop tg_leaf nip nip nip
 ;
 
@@ -154,14 +154,14 @@ bp_unpin drop tg_leaf nip nip nip
 : bk_ins
 2 lit pick 2 lit pick bk_find          \ ( bktp keyp valp vp )
 dup if
-  cp8 2drop                            \ update value in place; drop keyp, bktp
+  kvcp8 2drop                            \ update value in place; drop keyp, bktp
 else
   drop                                 \ ( bktp keyp valp )
   2 lit pick @                         \ count ( bktp keyp valp count )
   3 lit pick 4 lit + over 40 lit * +   \ keydst = bktp+4+count*0x40
-  3 lit pick swap cp8                  \ cp8(keyp, keydst)
+  3 lit pick swap kvcp8                  \ kvcp8(keyp, keydst)
   3 lit pick 4 lit + over 40 lit * + 20 lit +   \ valdst
-  2 lit pick swap cp8                  \ cp8(valp, valdst)
+  2 lit pick swap kvcp8                  \ kvcp8(valp, valdst)
   1 lit + 3 lit pick !                 \ count++ at bktp
   2drop drop
 then
@@ -226,7 +226,7 @@ nip nip                                \ ( intpage )
 
 \ ── tr_put ( eng keyp valp -- )  insert or update keyp -> valp, copy-on-write.  The
 \ committed root stays valid until the meta flips; this only mutates the WORKING root
-\ (call inside a txn, then commit).  Requires tr_init to have run. ──
+\ (call inside a txn, then commit).  Requires trie_ini to have run. ──
 : tr_put
 \ stash keyp/valp/depth into the (pre-allocated) trie context
 2 lit pick eng_tc                      \ ( eng keyp valp tc )
@@ -367,7 +367,7 @@ then
 dup 8 lit + @ is_leaf if
   dup 10 lit + @ over @ bk_find          \ vp = bk_find(framep, keyp) ; ( lk vp )
   dup if
-    over 4 lit + @ cp8                    \ copy value into lk.valp
+    over 4 lit + @ kvcp8                    \ copy value into lk.valp
     1 lit over 1C lit + !                 \ result = found
   else
     drop  0 lit over 1C lit + !           \ result = not found
