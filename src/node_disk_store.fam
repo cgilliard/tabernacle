@@ -1,0 +1,491 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ src/node_disk_store.fam — the COW storage engine's COMMON layer (doc/COW_TRIE.md).
+\
+\ Built bottom-up; this file accretes the shared engine the trie / PMMR / bitmap
+\ all sit on:  buffer pool (§5)  ->  meta sector + allocator (§7,§8)  ->  txn (§9).
+\ This first landing is the BUFFER POOL only.
+\
+\ Compiled after src/fence.fam + src/disk.fam (it uses vread/vwrite/vpoll/vstat/
+\ vwait from disk.fam).  No fam globals — every singleton lives in a caller-
+\ allocated block (the node forbids globals; its variable region overlaps the
+\ served image).  alloc is bump-only, so the pool is allocated ONCE (bp_init) and
+\ reused for the node's whole life.
+\
+\ Page = 512 B = one disk sector = one I/O request.  Page number == sector number.
+\
+\ POOL HANDLE  `bp`  (0x10 bytes, caller-allocated by bp_init):
+\   bp+0x00 ds       pointer to the disk-state block (the disk.fam `ds`)
+\   bp+0x04 nframes  frame count
+\   bp+0x08 hand     CLOCK sweep hand (frame index)
+\   bp+0x0C base     pointer to frame 0
+\
+\ FRAME  (stride 0x210; data + metadata interleaved so one pointer addresses both):
+\   frame+0x000 data[0x200]   the 512-B page contents (also the DMA buffer)
+\   frame+0x200 page          page#/sector this frame holds (FFFFFFFF = empty)
+\   frame+0x204 flags         bit0 dirty, bit1 ref (CLOCK), bit2 filling (read in-flight)
+\   frame+0x208 pin           pin count (non-evictable while > 0)
+\   frame+0x20C slot          disk.fam slot id of an in-flight read (valid while filling)
+\
+\ Page-in is NON-BLOCKING (§6): bp_start issues a vread and marks the frame
+\ "filling"; bp_ready polls it to completion.  bp_get is the BLOCKING convenience
+\ (boot path only) layered on top.
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ ── frm ( bp i -- framep )  address of frame i ──
+: frm
+swap C lit + @ swap 210 lit * +
+;
+
+\ ── adv_hand ( bp -- )  hand = (hand + 1) mod nframes ──
+: adv_hand
+dup 8 lit + @ 1 lit + over 4 lit + @ % over 8 lit + ! drop
+;
+
+\ ── bp_init ( ds nframes -- bp )  allocate the handle + frames; mark all empty ──
+: bp_init
+10 lit alloc                         \ ( ds nframes bp )
+swap over 4 lit + !                   \ bp.nframes = nframes ; ( ds bp )
+swap over !                           \ bp.ds = ds ; ( bp )
+0 lit over 8 lit + !                  \ bp.hand = 0
+dup 4 lit + @ 210 lit * alloc         \ ( bp base )
+over C lit + !                        \ bp.base = base
+dup 4 lit + @ 0 lit do                \ ( bp )  init each frame
+  dup i frm                           \ ( bp framep )
+  FFFFFFFF lit over 200 lit + !       \ page = empty
+  0 lit over 204 lit + !              \ flags = 0
+  0 lit over 208 lit + !              \ pin = 0
+  0 lit over 20C lit + !              \ slot = 0
+  drop
+loop
+;
+
+\ ── bp_wb ( bp framep -- bp framep )  write the frame back IF dirty; clear dirty ──
+: bp_wb
+dup 204 lit + @ 1 lit and if          \ dirty?
+  1 lit pick @                         \ ds = bp.ds        ( bp framep ds )
+  over 200 lit + @                     \ page (= sector)   ( bp framep ds page )
+  2 lit pick                           \ buf = framep      ( bp framep ds page framep )
+  vwrite                               \ ( bp framep ds id )
+  vwait                                \ ( bp framep ds id )  blocking writeback
+  2drop                                \ ( bp framep )
+  dup 204 lit + dup @ FFFFFFFE lit and swap !   \ clear dirty bit0
+then
+;
+
+\ ── bp_evict ( bp -- bp framep )  CLOCK second-chance: pick an unpinned victim,
+\ writing it back if dirty.  Aborts if every frame is pinned (a guard the trie's
+\ pin discipline must keep from firing — see §5 known gap). ──
+: bp_evict
+0 lit 0 lit                           \ ( bp cnt result )
+begin dup 0= while                    \ loop while no victim chosen yet
+  1 lit pick 3 lit pick 4 lit + @ 4 lit * u< invert if "bp:allpin\n" puts bye then
+  2 lit pick dup 8 lit + @ frm         \ ( bp cnt result framep )
+  dup 208 lit + @ 0 lit = if           \ pin == 0 ?
+    dup 204 lit + @ 2 lit and if       \ ref set -> second chance
+      dup 204 lit + dup @ FFFFFFFD lit and swap !   \ clear ref bit1
+      drop                             \ ( bp cnt result )
+      2 lit pick adv_hand
+      swap 1 lit + swap                \ cnt++
+    else                               \ pin 0, ref 0 -> SELECT
+      nip                              \ result := framep ; ( bp cnt framep )
+      2 lit pick adv_hand
+    then
+  else                                 \ pinned -> skip
+    drop
+    2 lit pick adv_hand
+    swap 1 lit + swap                  \ cnt++
+  then
+repeat                                 \ ( bp cnt framep )
+swap drop                              \ ( bp framep )
+bp_wb
+;
+
+\ ── bp_probe ( bp page -- bp framep|0 )  pool hit?  On a VALID (non-filling) hit,
+\ pin it + set its ref bit and return the frame; else 0. ──
+: bp_probe
+0 lit                                 \ ( bp page found )
+2 lit pick 4 lit + @ 0 lit do         \ ( bp page found )
+  dup 0= if                           \ not found yet?
+    2 lit pick i frm                  \ ( bp page found framep )
+    dup 200 lit + @ 3 lit pick = if   \ frame.page == page ?
+      dup 204 lit + @ 4 lit and 0= if \ not filling ?
+        dup 208 lit + dup @ 1 lit + swap !   \ pin++
+        dup 204 lit + dup @ 2 lit or swap !  \ ref = 1
+        nip                           \ found := framep ; ( bp page framep )
+      else drop then
+    else drop then
+  then
+loop
+nip                                   \ ( bp found )  drop page
+;
+
+\ ── bp_start ( bp page -- bp framep )  MISS path: evict a frame, point it at page,
+\ issue a non-blocking vread into it, mark it filling + pinned.  The frame is NOT
+\ valid until bp_ready reports done. ──
+: bp_start
+swap bp_evict                         \ ( page bp framep )
+2 lit pick over 200 lit + !           \ frame.page = page
+6 lit over 204 lit + !                \ flags = filling(4)|ref(2)
+1 lit over 208 lit + !                \ pin = 1
+1 lit pick @                          \ ds                 ( page bp framep ds )
+3 lit pick                            \ page (= sector)     ( page bp framep ds page )
+2 lit pick                            \ buf = framep        ( ... ds page framep )
+vread                                 \ ( page bp framep ds id )
+2 lit pick 20C lit + !                \ frame.slot = id     ( page bp framep ds )
+drop                                  \ ( page bp framep )
+rot drop                              \ ( bp framep )
+;
+
+\ ── bp_ready ( bp framep -- bp framep done? )  pump completions; if this frame's
+\ read finished, clear filling and report done.  Already-valid frames report done. ──
+: bp_ready
+over @ vpoll drop                     \ vpoll(bp.ds)
+dup 204 lit + @ 4 lit and 0= if       \ not filling -> already valid
+  1 lit
+else
+  over @ over 20C lit + @ vstat        \ ( bp framep ds done? )
+  swap drop                            \ ( bp framep done? )
+  dup if                               \ just completed -> clear filling bit2
+    over 204 lit + dup @ FFFFFFFB lit and swap !
+  then
+then
+;
+
+\ ── bp_get ( bp page -- bp framep )  BLOCKING page access (boot path only, §6.4):
+\ hit, or page-in and spin to completion.  Returns a pinned, valid frame. ──
+: bp_get
+over over bp_probe                    \ ( bp page bp framep|0 )
+dup if
+  nip nip                             \ hit -> ( bp framep )
+else
+  drop drop                           \ ( bp page )
+  bp_start                            \ ( bp framep )
+  begin bp_ready until                \ spin until valid
+then
+;
+
+\ ── bp_alloc ( bp page -- bp framep )  fresh page, NO read: evict a frame, claim
+\ it for page, mark dirty + pinned + valid.  For COW writes to brand-new pages. ──
+: bp_alloc
+swap bp_evict                         \ ( page bp framep )
+2 lit pick over 200 lit + !           \ frame.page = page
+3 lit over 204 lit + !                \ flags = dirty(1)|ref(2)
+1 lit over 208 lit + !                \ pin = 1
+rot drop                              \ ( bp framep )
+;
+
+\ ── bp_dirty ( framep -- )  mark dirty ──
+: bp_dirty
+dup 204 lit + dup @ 1 lit or swap ! drop
+;
+
+\ ── bp_unpin ( framep -- )  release one pin ──
+: bp_unpin
+dup 208 lit + dup @ 1 lit - swap ! drop
+;
+
+\ ── bp_flush ( bp -- bp )  write back every dirty frame (data durability is the
+\ caller's vflush, §9). ──
+: bp_flush
+dup 4 lit + @ 0 lit do
+  dup i frm bp_wb drop
+loop
+;
+
+\ ── bp_drop ( bp -- bp )  discard every DIRTY (uncommitted COW) frame: mark it
+\ empty + unpinned so it is never written back.  Used by rollback — the COW copies a
+\ rolled-back txn made are unreferenced garbage the moment we keep the old root. ──
+: bp_drop
+dup 4 lit + @ 0 lit do
+  dup i frm                           \ ( bp framep )
+  dup 204 lit + @ 1 lit and if        \ dirty?
+    FFFFFFFF lit over 200 lit + !     \ page = empty
+    0 lit over 204 lit + !            \ flags = 0
+    0 lit over 208 lit + !            \ pin = 0
+  then
+  drop
+loop
+;
+
+\ ══════════════════════════════════════════════════════════════════════════════
+\ META SECTOR + ALLOCATOR (§7, §8)  + the single ENGINE HANDLE that owns all RAM.
+\
+\ ENGINE HANDLE  `eng`  (0x14 bytes, allocated ONCE by eng_init):
+\   eng+0x00 bp       pointer to the buffer pool
+\   eng+0x04 wmeta    pointer to the 512-B WORKING meta buffer
+\   eng+0x08 cmeta    pointer to the 512-B COMMITTED meta buffer
+\   eng+0x0C slot     disk page (0 or 1) holding the currently-committed meta
+\   eng+0x10 (reserved: trie descent-path array, chunk 4)
+\
+\ META SECTOR (512 B, double-buffered across disk pages 0 and 1):
+\   +0x000 magic=0x54524945("TRIE")  +0x004 counter  +0x008 trie_root(page#,0=empty)
+\   +0x00C next_page(bump hi-water)  +0x010 free_head(GC, later)  +0x1FC checksum
+\
+\ ALL RAM is allocated by eng_init; mt_boot / mt_save / pg_new touch only those
+\ pre-allocated buffers — no per-operation alloc, so nothing leaks (§13).
+\ ══════════════════════════════════════════════════════════════════════════════
+
+\ ── mt_z ( buf -- )  zero a 512-B sector buffer ──
+: mt_z
+80 lit 0 lit do
+  dup i 4 lit * + 0 lit swap !
+loop
+drop
+;
+
+\ ── mt_csum ( buf -- sum )  additive sum of the first 127 words (excludes the
+\ checksum word at +0x1FC) ──
+: mt_csum
+0 lit
+7F lit 0 lit do
+  over i 4 lit * + @ +
+loop
+nip
+;
+
+\ ── mt_setck ( buf -- )  store the checksum word ──
+: mt_setck
+dup mt_csum over 1FC lit + ! drop
+;
+
+\ ── mt_valid ( buf -- flag )  magic correct AND checksum matches ──
+: mt_valid
+dup @ 54524945 lit <> if drop 0 lit else
+  dup mt_csum swap 1FC lit + @ =
+then
+;
+
+\ ── mt_cp ( src dst -- )  copy a whole 512-B sector ──
+: mt_cp
+80 lit 0 lit do
+  over i 4 lit * + @ over i 4 lit * + !
+loop
+2drop
+;
+
+\ ── mt_gen ( buf -- )  fill a buffer with the genesis meta (next_page=2: pages 0,1
+\ are the meta itself) ──
+: mt_gen
+dup mt_z
+54524945 lit over !                   \ magic
+0 lit over 4 lit + !                  \ counter = 0
+0 lit over 8 lit + !                  \ trie_root = 0 (empty)
+2 lit over C lit + !                  \ next_page = 2
+0 lit over 10 lit + !                 \ free_head = 0
+mt_setck
+;
+
+\ ── mt_rd ( ds page buf -- ) / mt_wr ( ds page buf -- )  blocking single-sector
+\ I/O for the meta (separate from the pool: meta is read before the pool is useful
+\ and written as the commit point) ──
+: mt_rd  vread  vwait 2drop ;
+: mt_wr  vwrite vwait 2drop ;
+
+\ ── mt_flush ( ds -- )  durability barrier; no-op (-1) in writethrough mode ──
+: mt_flush
+vflush dup FFFFFFFF lit = if 2drop else vwait 2drop then
+;
+
+\ ── eng_init ( ds nframes -- eng )  THE single allocation point: pool (handle +
+\ frames), the engine handle, and the two meta buffers.  Called once for the node's
+\ whole life; everything afterward reuses these. ──
+: eng_init
+bp_init                               \ ( bp )  pool handle + frames
+14 lit alloc                          \ ( bp eng )
+swap over !                           \ eng.bp = bp
+200 lit alloc over 4 lit + !          \ eng.wmeta
+200 lit alloc over 8 lit + !          \ eng.cmeta
+0 lit over C lit + !                  \ eng.slot = 0
+0 lit over 10 lit + !                 \ reserved
+;
+
+\ ── eng_ds ( eng -- ds )  the disk-state block (eng.bp.ds) ──
+: eng_ds  @ @ ;
+
+\ ── wroot@ ( eng -- page ) / wroot! ( eng page -- )  working trie root ──
+: wroot@  4 lit + @ 8 lit + @ ;
+: wroot!  swap 4 lit + @ 8 lit + ! ;
+
+\ ── mt_boot ( eng -- )  load committed state: read both meta pages, take the valid
+\ one with the higher counter; on a fresh disk (neither valid) write genesis.  Then
+\ the working meta starts as a copy of the committed meta. ──
+: mt_boot
+dup eng_ds 0 lit  2 lit pick 8 lit + @  mt_rd     \ cmeta <- page 0
+dup eng_ds 1 lit  2 lit pick 4 lit + @  mt_rd     \ wmeta <- page 1
+dup 8 lit + @ mt_valid                            \ v0 (cmeta)
+over 4 lit + @ mt_valid                            \ v1 (wmeta)
+swap                                              \ ( eng v1 v0 )
+if                                                \ page 0 valid
+  if                                              \ both valid -> higher counter wins
+    dup 8 lit + @ 4 lit + @                       \ cmeta.counter
+    over 4 lit + @ 4 lit + @                      \ wmeta.counter
+    u< if                                         \ cmeta < wmeta -> page 1 wins
+      dup 4 lit + @ over 8 lit + @ mt_cp          \ wmeta -> cmeta
+      1 lit over C lit + !
+    else
+      0 lit over C lit + !
+    then
+  else                                            \ page 0 only
+    0 lit over C lit + !
+  then
+else                                              \ page 0 invalid ; ( eng v1 )
+  if                                              \ page 1 only
+    dup 4 lit + @ over 8 lit + @ mt_cp            \ wmeta -> cmeta
+    1 lit over C lit + !
+  else                                            \ neither -> genesis
+    dup 8 lit + @ mt_gen                          \ genesis into cmeta
+    dup eng_ds 0 lit  2 lit pick 8 lit + @  mt_wr \ persist to page 0
+    dup eng_ds mt_flush
+    0 lit over C lit + !
+  then
+then
+dup 8 lit + @ over 4 lit + @ mt_cp                \ cmeta -> wmeta (working = committed)
+drop
+;
+
+\ ── mt_save ( eng -- )  commit the working meta: bump counter, checksum, write the
+\ OFF slot, flush durable, flip the live slot, and adopt working as committed.  This
+\ single sector write + flush is the atomic commit point (§7). ──
+: mt_save
+dup 8 lit + @ 4 lit + @ 1 lit +        \ committed counter + 1
+over 4 lit + @ 4 lit + !               \ wmeta.counter = that
+dup 4 lit + @ mt_setck                  \ checksum the working meta
+dup C lit + @ 1 lit swap -              \ off = 1 - slot
+over eng_ds swap                        \ ( eng ds off )
+2 lit pick 4 lit + @                    \ wmeta
+mt_wr                                   \ write wmeta to the off page
+dup eng_ds mt_flush                     \ data durable before the flip
+dup C lit + @ 1 lit swap - over C lit + !   \ slot = off (atomic flip)
+dup 4 lit + @ over 8 lit + @ mt_cp      \ wmeta -> cmeta
+drop
+;
+
+\ ── pg_new ( eng -- eng page )  bump allocator: hand out the next free page and
+\ advance the working hi-water (rollback resets it by restoring the committed meta).
+\ Free-list reuse is a later GC concern (§8). ──
+: pg_new
+dup 4 lit + @ C lit + @                 \ page = wmeta.next_page
+over 4 lit + @ C lit + @ 1 lit +        \ next + 1
+2 lit pick 4 lit + @ C lit + !          \ wmeta.next_page = next + 1
+;
+
+\ ══════════════════════════════════════════════════════════════════════════════
+\ TRANSACTION (§9) — thin, because the pool and meta do the work.  Single writer,
+\ one txn at a time; readers ride the committed snapshot (no concurrency control).
+\ ══════════════════════════════════════════════════════════════════════════════
+
+\ ── tx_begin ( eng -- )  start a txn: working meta := committed meta ──
+: tx_begin
+dup 8 lit + @ over 4 lit + @ mt_cp      \ cmeta -> wmeta
+drop
+;
+
+\ ── commit ( eng -- )  flush dirty data pages, make them durable, THEN write +
+\ flush + flip the meta.  The data-before-meta ordering is the barrier: the meta
+\ never points at a page that is not already durable. ──
+: commit
+dup @ bp_flush drop                     \ dirty data pages -> disk
+dup eng_ds mt_flush                     \ data durable
+mt_save                                 \ meta off-slot -> flush -> flip
+;
+
+\ ── rollback ( eng -- )  abandon the txn: drop the dirty COW frames and restore the
+\ working meta (trie_root + next_page) from the committed copy.  Touches no disk. ──
+: rollback
+dup @ bp_drop drop                      \ discard uncommitted COW frames
+dup 8 lit + @ over 4 lit + @ mt_cp      \ cmeta -> wmeta
+drop
+;
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Tests — NO-DEVICE logic only (frame mgmt, CLOCK eviction, probe, alloc).  The
+\ disk-touching paths (bp_get/bp_start/bp_ready/bp_wb real I/O) are covered by the
+\ real-device evict_rt in tests/node_disk_store_dev.fam.  We use ds=0 here and only
+\ ever evict/alloc CLEAN frames, so vwrite/vread are never reached.
+\ ──────────────────────────────────────────────────────────────────────────────
+Test {
+\ bp_init lays out the handle + frames, all empty.
+pool_ini {
+0 lit 4 lit bp_init
+dup 4 lit + @ 4 lit asrt_eq                   \ nframes
+dup 8 lit + @ 0 lit asrt_eq                   \ hand
+dup 0 lit frm 200 lit + @ FFFFFFFF lit asrt_eq \ frame0 page empty
+dup 0 lit frm 208 lit + @ 0 lit asrt_eq        \ frame0 pin 0
+0 lit frm 204 lit + @ 0 lit asrt_eq            \ frame0 flags 0
+}
+\ frm computes base + i*0x210.
+frm_mth {
+0 lit 4 lit bp_init
+dup C lit + @ swap 2 lit frm swap 420 lit + asrt_eq   \ frame2 == base + 0x420
+}
+\ probe miss on an empty pool -> 0.
+probe_ms {
+0 lit 4 lit bp_init
+55 lit bp_probe swap drop 0 lit asrt_eq
+}
+\ probe hit: pin++ and the matching frame is returned.
+probe_ht {
+0 lit 4 lit bp_init
+dup 1 lit frm 55 lit swap 200 lit + !         \ frame1.page = 0x55
+55 lit bp_probe                               \ ( bp framep )
+over 1 lit frm asrt_eq                         \ returned frame1
+1 lit frm 208 lit + @ 1 lit asrt_eq            \ pin bumped to 1
+}
+\ CLOCK: fresh pool picks frame0 (hand->1); a ref-set frame gets a second chance.
+evict_c {
+0 lit 4 lit bp_init
+bp_evict over 0 lit frm asrt_eq               \ first victim = frame0
+dup 8 lit + @ 1 lit asrt_eq                    \ hand advanced to 1
+dup 1 lit frm 2 lit swap 204 lit + !          \ frame1.flags = ref
+bp_evict over 2 lit frm asrt_eq               \ frame1 skipped -> frame2 chosen
+dup 1 lit frm 204 lit + @ 0 lit asrt_eq        \ frame1 ref cleared
+8 lit + @ 3 lit asrt_eq                        \ hand advanced past both -> 3
+}
+\ bp_alloc claims a fresh page (no read): page set, dirty+ref, pinned.
+alloc_t {
+0 lit 4 lit bp_init
+77 lit bp_alloc over 0 lit frm asrt_eq        \ used frame0
+dup 0 lit frm 200 lit + @ 77 lit asrt_eq       \ page set
+dup 0 lit frm 204 lit + @ 3 lit asrt_eq        \ flags dirty|ref
+0 lit frm 208 lit + @ 1 lit asrt_eq            \ pin 1
+}
+\ bp_dirty sets the dirty bit; bp_unpin drops one pin.
+dirty_t {
+0 lit 4 lit bp_init
+dup 0 lit frm bp_dirty
+dup 0 lit frm 204 lit + @ 1 lit asrt_eq        \ dirty set
+dup 0 lit frm 2 lit swap 208 lit + !          \ pin = 2
+dup 0 lit frm bp_unpin
+0 lit frm 208 lit + @ 1 lit asrt_eq            \ pin 2 -> 1
+}
+\ mt_gen produces a valid genesis meta (magic + next_page=2 + good checksum).
+meta_gen {
+200 lit alloc dup mt_gen
+dup @ 54524945 lit asrt_eq                     \ magic
+dup C lit + @ 2 lit asrt_eq                    \ next_page == 2
+mt_valid assert                                 \ checksum valid (true = 0xFFFFFFFF)
+}
+\ tampering any covered word breaks the checksum.
+meta_ck {
+200 lit alloc dup mt_gen
+dup 8 lit + 99 lit swap !                      \ tamper trie_root word
+mt_valid 0 lit asrt_eq                          \ no longer valid
+}
+\ mt_cp copies the full 512-B sector (validity + a field carry over).
+meta_cp {
+200 lit alloc dup mt_gen                       \ ( src )
+200 lit alloc                                  \ ( src dst )
+over over mt_cp
+dup mt_valid assert                             \ ( src dst )  copy is valid
+C lit + @ 2 lit asrt_eq                         \ dst.next_page copied  ( src )
+drop
+}
+\ pg_new hands out the hi-water then bumps it; no allocation per call.
+pgnew_t {
+0 lit 2 lit eng_init                            \ ds=0, no device touched
+dup 4 lit + @ mt_gen                            \ genesis-fill the working meta
+pg_new 2 lit asrt_eq                            \ first page = 2
+pg_new 3 lit asrt_eq                            \ second page = 3
+4 lit + @ C lit + @ 4 lit asrt_eq               \ next_page now 4  (consumes eng)
+}
+}

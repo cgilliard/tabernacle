@@ -1,107 +1,127 @@
 \ ──────────────────────────────────────────────────────────────────────────────
-\ tests/node_disk_store_dev.fam — REAL virtio-blk tests of the common storage
-\ engine (src/node_disk_store.fam): buffer-pool eviction round-trip, the
-\ double-buffered meta sector, and the transaction.  Needs a disk; run as:
-\   ./tools/fam --test --disk=d.img src/node_disk.fam src/node_disk_store.fam \
-\               tests/node_disk_store_dev.fam
+\ tests/node_disk_store_dev.fam — REAL virtio-blk test of the buffer pool
+\ (src/node_disk_store.fam §5): a 1-frame eviction round-trip that exercises the
+\ actual disk-touching paths (bp_alloc -> dirty writeback on evict -> bp_get
+\ page-in via bp_start/bp_ready).  Run with a disk attached:
+\   ./tools/fam --test --disk=scratch.img src/fence.fam src/disk.fam \
+\               src/node_disk_store.fam tests/node_disk_store_dev.fam
+\ With no --disk, find_blk prints "no blk" and halts.  Uses raw pages 0x20/0x21 and
+\ only checks the sentinel it writes itself, so it needs no genesis/meta setup and
+\ is safe on the shared scratch disk.
 \ ──────────────────────────────────────────────────────────────────────────────
 
+\ dsinit ( ds -- ds )  zero cursors, page-align + zero qb, find + handshake the dev.
+: dsinit
+0 lit over 8 lit + !                       \ subd = 0
+0 lit over C lit + !                       \ usd  = 0
+0 lit over 10 lit + !                      \ next = 0
+5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ qb (page-aligned)
+dup 4 lit + @ qzero
+find_blk over !                            \ dev
+vblkinit
+;
+
 Test {
-\ A 2-frame pool, three pages written through it: the third alloc forces an
-\ eviction (writing a dirty frame back to disk).  After flushing the rest, reading
-\ all three back pages at least one of them in from disk -- so a correct round trip
-\ proves bp_alloc/bp_evict/bp_wb/bp_flush/bp_get and the on-disk data all agree.
+\ One frame, so any new page forces an eviction.  Stamp a sentinel into page 0x20,
+\ unpin; fetching 0x21 must write 0x20 back to disk (dirty) before reading 0x21 in;
+\ fetching 0x20 again must read it back from disk with the sentinel intact -- proving
+\ the writeback + page-in went all the way to the device.
 evict_rt {
-\ a real-device disk handle (dst): qb, dev, aidx
-1C lit alloc                              \ ( dst )
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ dst.qb (page-aligned)
-find_blk over !                           \ dst.dev
-0 lit over 14 lit + !                     \ dst.aidx = 0
-vblkinit                                  \ handshake ; ( dst )
-2 lit bp_init                             \ ( bp )  2-frame pool
-
-\ write 3 distinct pages (a marker word at offset 0); each unpinned so it can evict
-dup 10 lit bp_alloc  AAAA0010 lit over !  dup bp_unpin drop   \ page 10
-dup 11 lit bp_alloc  AAAA0011 lit over !  dup bp_unpin drop   \ page 11
-dup 12 lit bp_alloc  AAAA0012 lit over !  dup bp_unpin drop   \ page 12 -> evicts one
-dup bp_flush                              \ write the remaining dirty frames back
-
-\ read every page back through the pool (forces a reload of the evicted one)
-dup 10 lit bp_get dup @ AAAA0010 lit asrt_eq bp_unpin
-dup 11 lit bp_get dup @ AAAA0011 lit asrt_eq bp_unpin
-dup 12 lit bp_get dup @ AAAA0012 lit asrt_eq bp_unpin
-drop                                      \ ( )
+40 lit alloc dsinit                  \ ( ds )
+1 lit bp_init                        \ ( bp )  single-frame pool
+20 lit bp_alloc                      \ ( bp framep )  fresh page 0x20 (dirty, pinned)
+DEADBEEF lit over !                  \ framep.data[0] = sentinel
+bp_unpin                             \ ( bp )
+21 lit bp_get                        \ ( bp framep )  MISS: writes 0x20 back, reads 0x21
+dup 200 lit + @ 21 lit asrt_eq       \ frame now holds 0x21
+bp_unpin                             \ ( bp )
+20 lit bp_get                        \ ( bp framep )  MISS: reads 0x20 back from disk
+dup 200 lit + @ 20 lit asrt_eq       \ frame holds 0x20
+dup @ DEADBEEF lit asrt_eq           \ sentinel survived the disk round trip
+bp_unpin                             \ ( bp )
+drop
 }
-\ Meta double-buffer: genesis -> commit -> reboot persists -> second commit flips
-\ to the other slot (higher counter wins) -> a torn (zeroed) slot falls back.
+\ Meta sector full cycle on the real device: genesis (zeroed meta pages) -> commit
+\ (slot flips 0->1, counter 0->1, trie_root + bumped next_page persisted) -> reboot
+\ recovers the higher-counter slot from disk -> a 2nd commit flips slot 1->0 ->
+\ a torn commit (live slot zeroed) makes boot fall back to the older valid slot.
 mt_cycle {
-1C lit alloc                              \ ( dst )
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
-find_blk over !
-0 lit over 14 lit + !
-vblkinit                                  \ ( dst )
-4 lit tr_init                             \ pool(4) + meta + boot ; ( )
-\ fresh disk -> genesis
-_eng_c @ 4 lit + @ 0 lit asrt_eq          \ counter 0
-_eng_c @ 8 lit + @ 0 lit asrt_eq          \ trie_root empty
-\ allocator hands out pages 2, 3, ... from genesis next_page
-pg_new 2 lit asrt_eq
-pg_new 3 lit asrt_eq
-\ commit #1: set a root, save -> counter 1 in slot 0
-1234 lit _eng_w @ 8 lit + !               \ working.trie_root = 0x1234
-mt_save
-_eng_c @ 4 lit + @ 1 lit asrt_eq          \ committed counter 1
-\ reboot (re-read from disk) -> the committed state persists
-mt_boot
-_eng_c @ 4 lit + @ 1 lit asrt_eq
-_eng_c @ 8 lit + @ 1234 lit asrt_eq
-\ commit #2 -> counter 2 lands in slot 1, and boot prefers it
-5678 lit _eng_w @ 8 lit + !
-mt_save
-mt_boot
-_eng_c @ 4 lit + @ 2 lit asrt_eq          \ higher counter wins
-_eng_c @ 8 lit + @ 5678 lit asrt_eq
-\ torn commit: zero slot 1 on disk -> boot falls back to slot 0 (counter 1)
-_eng_w @ mt_z
-_eng_bp @ @ _eng_w @ 1 lit mt_wr
-mt_boot
-_eng_c @ 4 lit + @ 1 lit asrt_eq          \ slot 1 invalid -> slot 0 wins
-_eng_c @ 8 lit + @ 1234 lit asrt_eq
+40 lit alloc dsinit                  \ ( ds )
+200 lit alloc dup mt_z               \ ( ds zbuf )
+over 0 lit 2 lit pick mt_wr          \ zero meta page 0 (force genesis)
+over 1 lit 2 lit pick mt_wr          \ zero meta page 1
+drop                                 \ ( ds )
+4 lit eng_init                       \ ( eng )  ds + 4-frame pool
+dup mt_boot                          \ neither slot valid -> genesis
+dup 4 lit + @ 4 lit + @ 0 lit asrt_eq      \ counter == 0
+dup 4 lit + @ C lit + @ 2 lit asrt_eq      \ next_page == 2
+dup C lit + @ 0 lit asrt_eq                \ committed slot == 0
+\ --- modify working state and commit ---
+pg_new 2 lit asrt_eq                       \ pg_new hands out page 2 (next_page->3)
+2A lit over 4 lit + @ 8 lit + !            \ wmeta.trie_root = 0x2A
+dup mt_save                                 \ commit
+dup C lit + @ 1 lit asrt_eq                \ slot flipped to 1
+dup 8 lit + @ 4 lit + @ 1 lit asrt_eq      \ committed counter == 1
+\ --- reboot: re-read committed meta from disk ---
+dup mt_boot
+dup C lit + @ 1 lit asrt_eq                \ recovered the higher-counter slot (1)
+dup 4 lit + @ 8 lit + @ 2A lit asrt_eq      \ trie_root persisted
+dup 4 lit + @ C lit + @ 3 lit asrt_eq       \ next_page persisted (bumped to 3)
+\ --- second commit flips back to slot 0 ---
+dup mt_save
+dup C lit + @ 0 lit asrt_eq                \ slot flipped back to 0
+dup 8 lit + @ 4 lit + @ 2 lit asrt_eq      \ counter == 2
+\ --- torn commit: corrupt the live slot (page 0); boot falls back to slot 1 ---
+200 lit alloc dup mt_z                     \ ( eng zbuf )
+over eng_ds 0 lit 2 lit pick mt_wr         \ zero page 0 -> fails checksum
+drop                                        \ ( eng )
+dup mt_boot
+dup C lit + @ 1 lit asrt_eq                \ fell back to slot 1
+4 lit + @ 4 lit + @ 1 lit asrt_eq          \ counter == 1 (older valid slot)
 }
-\ Transaction: pool + meta commit together.  Write a data page through the pool,
-\ record it in the meta, commit, "reboot" with a fresh pool, and confirm the page
-\ persisted (came from disk).  Then a rollback leaves the committed state untouched.
+\ Transaction commit + persistence: in a txn, allocate a page through the pool, stamp
+\ a sentinel, record it as the trie_root, and commit.  A SEPARATE engine with a FRESH
+\ pool over the same disk then boots the committed meta and reads that page back from
+\ disk -- proving the whole txn (data pages + meta flip) is durable.
 tx_rt {
-1C lit alloc                              \ ( dst )
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
-find_blk over !
-0 lit over 14 lit + !
-vblkinit                                  \ ( dst )
-4 lit tr_init                             \ genesis ; ( )
-\ --- commit: allocate a data page, fill it, record it in trie_root ---
-tx_begin
-pg_new                                    \ ( page )  (page 2 from genesis)
-_eng_bp @ over bp_alloc                   \ ( page framep )  dirty, pinned
-CAFEBABE lit over !                        \ framep.data[0] = marker
-dup bp_unpin                              \ ( page framep )
-drop                                      \ ( page )
-_eng_w @ 8 lit + !                        \ working.trie_root = page ; ( )
-commit
-\ --- reboot: fresh pool + re-read committed meta from disk ---
-_eng_bp @ @ 4 lit tr_init                 \ ( )  recover the dst, re-init over it
-_eng_c @ 8 lit + @                        \ ( root )  committed trie_root persisted
-_eng_bp @ over bp_get                     \ ( root framep )  page-in from disk
-@ CAFEBABE lit asrt_eq                      \ data survived commit + reboot ; ( root )
-drop                                      \ ( )
-\ --- rollback: an aborted txn must not change the committed state ---
-_eng_c @ 8 lit + @                        \ ( saved )  committed root
-tx_begin
-pg_new                                    \ ( saved page2 )
-_eng_bp @ over bp_alloc                   \ ( saved page2 framep )
-DEADBEEF lit over !                        \ a marker we expect to be discarded
-bp_unpin                                  \ ( saved page2 )
-_eng_w @ 8 lit + !                        \ working.trie_root = page2 ; ( saved )
-rollback
-_eng_c @ 8 lit + @ = assert               \ committed root == saved (unchanged) ; ( )
+40 lit alloc dsinit
+200 lit alloc dup mt_z
+over 0 lit 2 lit pick mt_wr
+over 1 lit 2 lit pick mt_wr
+drop                                 \ ( ds )
+4 lit eng_init                       \ ( eng )
+dup mt_boot                          \ genesis
+dup tx_begin
+pg_new                               \ ( eng page )
+1 lit pick @ over bp_alloc           \ ( eng page bp framep )  bp_alloc(eng.bp, page)
+CAFEF00D lit over !                  \ sentinel into the fresh page
+bp_unpin drop                        \ ( eng page )
+over swap wroot!                     \ record page as trie_root ; ( eng )
+dup commit
+\ fresh engine + pool over the same disk reads the committed page back
+dup eng_ds 4 lit eng_init            \ ( eng eng2 )
+dup mt_boot
+dup wroot@                           \ ( eng eng2 page )
+over @ swap bp_get                   \ ( eng eng2 bp framep )  bp_get(eng2.bp, page)
+dup @ CAFEF00D lit asrt_eq           \ sentinel survived commit + reboot via disk
+bp_unpin drop drop drop              \ ( )
+}
+\ Transaction rollback: a txn bumps next_page and sets a bogus root, then rolls back;
+\ the committed working state (root + next_page) must be exactly restored, touching
+\ no disk.
+tx_rb {
+40 lit alloc dsinit
+200 lit alloc dup mt_z
+over 0 lit 2 lit pick mt_wr
+over 1 lit 2 lit pick mt_wr
+drop
+4 lit eng_init                       \ ( eng )
+dup mt_boot                          \ genesis: root=0, next_page=2
+dup tx_begin
+dup pg_new 2drop                     \ bump working next_page to 3
+dup 55 lit wroot!                    \ bogus working root
+dup rollback                         \ discard the txn
+dup wroot@ 0 lit asrt_eq             \ root restored to committed (0)
+4 lit + @ C lit + @ 2 lit asrt_eq    \ next_page restored to 2  (consumes eng)
 }
 }
