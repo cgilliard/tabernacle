@@ -14,7 +14,7 @@
 0 lit over 8 lit + !
 0 lit over C lit + !
 0 lit over 10 lit + !
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+C000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
 dup 4 lit + @ qzero
 find_blk over !
 vblkinit
@@ -74,7 +74,7 @@ Test {
 \ Single bucket: put/update/get within a txn, commit, then a FRESH engine over the
 \ same disk reads the committed entries back (proves the COW writes are durable).
 trie_rt {
-40 lit alloc dsinit zmeta             \ ( ds )
+4C lit alloc dsinit zmeta             \ ( ds )
 10 lit eng_init                       \ ( eng )  16-frame pool
 dup mt_boot dup trie_ini dup _eng !
 tbuf
@@ -103,7 +103,7 @@ drop
 \ into an internal node, confirm every key is findable via descent, update one through
 \ the internal node, then reboot.
 trie_spl {
-40 lit alloc dsinit zmeta
+4C lit alloc dsinit zmeta
 10 lit eng_init
 dup mt_boot dup trie_ini dup _eng !
 tbuf
@@ -136,7 +136,7 @@ drop
 \ misses cache and goes through the DESCEND->WAIT->PROCESS state machine, hitting the
 \ real disk), then look up via the non-blocking fiber and check results.
 async_rt {
-40 lit alloc dsinit zmeta
+4C lit alloc dsinit zmeta
 10 lit eng_init dup mt_boot dup trie_ini dup _eng !
 tbuf abuf
 dup tx_begin
@@ -151,7 +151,7 @@ dup 33 lit afind 333 lit asrt_eq assert
 \ Two fibers driven INTERLEAVED over the same engine, on different disk slots (0 and 1),
 \ both reaching the right values -- proves independent lookups overlap correctly.
 async_2 {
-40 lit alloc dsinit zmeta
+4C lit alloc dsinit zmeta
 10 lit eng_init dup mt_boot dup trie_ini dup _eng !
 tbuf abuf abuf2
 dup tx_begin

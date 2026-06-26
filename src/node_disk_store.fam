@@ -31,9 +31,9 @@
 \ (boot path only) layered on top.
 \ ──────────────────────────────────────────────────────────────────────────────
 
-\ ── frm ( bp i -- framep )  address of frame i ──
+\ ── frm ( bp i -- framep )  address of frame i (stride 0x214: data 0x200 + 5 words) ──
 : frm
-swap C lit + @ swap 210 lit * +
+swap C lit + @ swap 214 lit * +
 ;
 
 \ ── adv_hand ( bp -- )  hand = (hand + 1) mod nframes ──
@@ -41,20 +41,34 @@ swap C lit + @ swap 210 lit * +
 dup 8 lit + @ 1 lit + over 4 lit + @ % over 8 lit + ! drop
 ;
 
-\ ── bp_init ( ds nframes -- bp )  allocate the handle + frames; mark all empty ──
+\ ── bp_init ( ds nframes -- bp )  allocate the handle + frames + page->frame hash
+\ index, mark all empty.  Handle (0x18): +0 ds +4 nframes +8 hand +C base
+\ +0x10 hbuckets(ptr) +0x14 hmask(=T-1).  T = smallest pow2 >= 2*nframes; each bucket
+\ holds a frame POINTER (0 = empty), frames chain via hnext@framep+0x210. ──
 : bp_init
-10 lit alloc                         \ ( ds nframes bp )
+18 lit alloc                         \ ( ds nframes bp )
 swap over 4 lit + !                   \ bp.nframes = nframes ; ( ds bp )
 swap over !                           \ bp.ds = ds ; ( bp )
 0 lit over 8 lit + !                  \ bp.hand = 0
-dup 4 lit + @ 210 lit * alloc         \ ( bp base )
+dup 4 lit + @ 214 lit * alloc         \ ( bp base )  frame stride 0x214
 over C lit + !                        \ bp.base = base
+\ hash table: T = smallest pow2 >= 2*nframes
+1 lit begin dup 2 lit pick 4 lit + @ 1 lit lshift u< while 1 lit lshift repeat   \ ( bp T )
+dup 1 lit - 2 lit pick 14 lit + !     \ bp.hmask = T-1
+dup 2 lit lshift alloc                \ ( bp T hbuckets )
+2 lit pick 10 lit + !                 \ bp.hbuckets = hbuckets ; ( bp T )
+1 lit pick 10 lit + @                 \ reload hbuckets ; ( bp T hbuckets )
+swap 0 lit do                         \ zero T buckets ; ( bp hbuckets )
+  dup i 4 lit * + 0 lit swap !
+loop
+drop                                  \ ( bp )
 dup 4 lit + @ 0 lit do                \ ( bp )  init each frame
   dup i frm                           \ ( bp framep )
   FFFFFFFF lit over 200 lit + !       \ page = empty
   0 lit over 204 lit + !              \ flags = 0
   0 lit over 208 lit + !              \ pin = 0
   0 lit over 20C lit + !              \ slot = 0
+  0 lit over 210 lit + !              \ hnext = 0 (not chained)
   drop
 loop
 ;
@@ -69,6 +83,37 @@ dup 204 lit + @ 1 lit and if          \ dirty?
   vwait                                \ ( bp framep ds id )  blocking writeback
   2drop                                \ ( bp framep )
   dup 204 lit + dup @ FFFFFFFE lit and swap !   \ clear dirty bit0
+then
+;
+
+\ ── h_ins ( bp framep -- )  insert framep at the head of its page's hash bucket
+\ (framep.page must already be set) ──
+: h_ins
+dup 200 lit + @                       \ ( bp framep page )
+2 lit pick 14 lit + @ and 2 lit lshift \ (page & hmask)*4
+2 lit pick 10 lit + @ +               \ baddr ; ( bp framep baddr )
+dup @ 2 lit pick 210 lit + !          \ framep.hnext = *baddr
+over swap !                           \ *baddr = framep
+2drop
+;
+
+\ ── h_rem ( bp framep -- )  unlink framep from its page's hash bucket chain (no-op
+\ if page is EMPTY).  Singly-linked: head-case O(1), else walk to the predecessor. ──
+: h_rem
+dup 200 lit + @ FFFFFFFF lit = if 2drop else
+  over 14 lit + @ over 200 lit + @ and 2 lit lshift 2 lit pick 10 lit + @ +   \ ( bp framep baddr )
+  dup @ 2 lit pick = if
+    over 210 lit + @ swap !            \ head == framep -> *baddr = framep.hnext
+  else
+    @                                  \ cur = *baddr ; ( bp framep cur )
+    begin dup if dup 210 lit + @ 2 lit pick <> else 0 lit then while
+      210 lit + @
+    repeat
+    dup if
+      2 lit pick 210 lit + @ swap 210 lit + !   \ cur.hnext = framep.hnext
+    else drop then                     \ framep not in chain -> no-op (robust)
+  then
+  2drop
 then
 ;
 
@@ -97,26 +142,28 @@ begin dup 0= while                    \ loop while no victim chosen yet
   then
 repeat                                 \ ( bp cnt framep )
 swap drop                              \ ( bp framep )
-bp_wb
+bp_wb                                  \ write back if dirty
+2dup h_rem                             \ unlink victim from its (old) hash bucket
+FFFFFFFF lit over 200 lit + !          \ page = EMPTY (caller sets the new page + h_ins)
 ;
 
-\ ── bp_probe ( bp page -- bp framep|0 )  pool hit?  On a VALID (non-filling) hit,
-\ pin it + set its ref bit and return the frame; else 0. ──
+\ ── bp_probe ( bp page -- bp framep|0 )  O(1) pool hit via the hash index.  Walks
+\ the page's bucket chain; on a VALID (non-filling) hit, pin it + set ref, return it;
+\ else 0. ──
 : bp_probe
-0 lit                                 \ ( bp page found )
-2 lit pick 4 lit + @ 0 lit do         \ ( bp page found )
-  dup 0= if                           \ not found yet?
-    2 lit pick i frm                  \ ( bp page found framep )
-    dup 200 lit + @ 3 lit pick = if   \ frame.page == page ?
-      dup 204 lit + @ 4 lit and 0= if \ not filling ?
-        dup 208 lit + dup @ 1 lit + swap !   \ pin++
-        dup 204 lit + dup @ 2 lit or swap !  \ ref = 1
-        nip                           \ found := framep ; ( bp page framep )
-      else drop then
-    else drop then
-  then
-loop
-nip                                   \ ( bp found )  drop page
+over 14 lit + @ over and 2 lit lshift 2 lit pick 10 lit + @ + @   \ cur = *bucket ( bp page cur )
+begin
+  dup if                              \ cur != 0 ?
+    dup 200 lit + @ 2 lit pick = over 204 lit + @ 4 lit and 0= and 0=   \ NOT a valid hit?
+  else 0 lit then                     \ cur == 0 -> stop
+while
+  210 lit + @                         \ cur = cur.hnext
+repeat                                \ ( bp page cur )  cur = hit frame or 0
+dup if
+  dup 208 lit + dup @ 1 lit + swap !  \ pin++
+  dup 204 lit + dup @ 2 lit or swap ! \ ref = 1
+then
+nip                                   \ ( bp framep|0 )  drop page
 ;
 
 \ ── bp_start ( bp page -- bp framep )  MISS path: evict a frame, point it at page,
@@ -127,6 +174,7 @@ swap bp_evict                         \ ( page bp framep )
 2 lit pick over 200 lit + !           \ frame.page = page
 6 lit over 204 lit + !                \ flags = filling(4)|ref(2)
 1 lit over 208 lit + !                \ pin = 1
+over over h_ins                       \ insert into the page->frame hash index
 1 lit pick @                          \ ds                 ( page bp framep ds )
 3 lit pick                            \ page (= sector)     ( page bp framep ds page )
 2 lit pick                            \ buf = framep        ( ... ds page framep )
@@ -171,6 +219,7 @@ swap bp_evict                         \ ( page bp framep )
 2 lit pick over 200 lit + !           \ frame.page = page
 3 lit over 204 lit + !                \ flags = dirty(1)|ref(2)
 1 lit over 208 lit + !                \ pin = 1
+over over h_ins                       \ insert into the page->frame hash index
 rot drop                              \ ( bp framep )
 ;
 
@@ -199,6 +248,7 @@ loop
 dup 4 lit + @ 0 lit do
   dup i frm                           \ ( bp framep )
   dup 204 lit + @ 1 lit and if        \ dirty?
+    over over h_rem                   \ unlink from hash (uses current page)
     FFFFFFFF lit over 200 lit + !     \ page = empty
     0 lit over 204 lit + !            \ flags = 0
     0 lit over 208 lit + !            \ pin = 0
@@ -413,10 +463,10 @@ dup 0 lit frm 200 lit + @ FFFFFFFF lit asrt_eq \ frame0 page empty
 dup 0 lit frm 208 lit + @ 0 lit asrt_eq        \ frame0 pin 0
 0 lit frm 204 lit + @ 0 lit asrt_eq            \ frame0 flags 0
 }
-\ frm computes base + i*0x210.
+\ frm computes base + i*0x214.
 frm_mth {
 0 lit 4 lit bp_init
-dup C lit + @ swap 2 lit frm swap 420 lit + asrt_eq   \ frame2 == base + 0x420
+dup C lit + @ swap 2 lit frm swap 428 lit + asrt_eq   \ frame2 == base + 0x428 (2*0x214)
 }
 \ probe miss on an empty pool -> 0.
 probe_ms {
@@ -425,8 +475,11 @@ probe_ms {
 }
 \ probe hit: pin++ and the matching frame is returned.
 probe_ht {
-0 lit 4 lit bp_init
-dup 1 lit frm 55 lit swap 200 lit + !         \ frame1.page = 0x55
+0 lit 4 lit bp_init                           \ ( bp )
+dup 1 lit frm                                  \ ( bp framep )
+55 lit over 200 lit + !                        \ frame1.page = 0x55
+2dup h_ins                                      \ register in the hash index (probe is hash-based now)
+drop                                            \ ( bp )
 55 lit bp_probe                               \ ( bp framep )
 over 1 lit frm asrt_eq                         \ returned frame1
 1 lit frm 208 lit + @ 1 lit asrt_eq            \ pin bumped to 1

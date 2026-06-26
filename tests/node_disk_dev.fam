@@ -38,7 +38,7 @@ until
 0 lit over 8 lit + !                       \ subd = 0
 0 lit over C lit + !                       \ usd  = 0
 0 lit over 10 lit + !                      \ next = 0
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ qb (page-aligned)
+C000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ qb (page-aligned)
 dup 4 lit + @ qzero
 find_blk over !                            \ dev
 vblkinit
@@ -52,7 +52,7 @@ Test {
 \ path worked.  (The CI job additionally cmp's the bytes on disk.)
 realwr {
 200 lit alloc ramp                   \ ( buf )
-40 lit alloc dsinit                  \ ( buf ds )
+4C lit alloc dsinit                  \ ( buf ds )
 swap 1 lit swap 0 lit swap           \ ( ds type=1 sector=0 buf )
 vreq                                 \ ( ds id )
 swap drvto                           \ ( id ds )  drive write to completion
@@ -65,7 +65,7 @@ swap 0 lit asrt_eq                   \ slot id == 0           ( ds )
 \ matching the ramp proves the read actually DMA'd the right sector's data in.
 rdtrip {
 200 lit alloc ramp                   \ ( wbuf )
-40 lit alloc dsinit                  \ ( wbuf ds )
+4C lit alloc dsinit                  \ ( wbuf ds )
 swap 1 lit swap 5 lit swap           \ ( ds 1 5 wbuf )
 vreq swap drvto                      \ ( id ds )  write sector 5
 swap drop                            \ ( ds )  drop write id
@@ -85,7 +85,7 @@ dup 100 lit + c@ 0 lit asrt_eq       \ rbuf[256] == 0   (ramp wraps)
 \ (a non-negative slot id); drvto then proves the flush completed on the device.
 flushtr {
 200 lit alloc ramp                   \ ( wbuf )
-40 lit alloc dsinit                  \ ( wbuf ds )
+4C lit alloc dsinit                  \ ( wbuf ds )
 swap 1 lit swap 7 lit swap           \ ( ds 1 7 wbuf )
 vreq swap drvto                      \ ( id ds )  write sector 7
 swap drop                            \ ( ds )

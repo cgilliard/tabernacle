@@ -15,7 +15,7 @@
 0 lit over 8 lit + !                       \ subd = 0
 0 lit over C lit + !                       \ usd  = 0
 0 lit over 10 lit + !                      \ next = 0
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ qb (page-aligned)
+C000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ qb (page-aligned)
 dup 4 lit + @ qzero
 find_blk over !                            \ dev
 vblkinit
@@ -27,7 +27,7 @@ Test {
 \ fetching 0x20 again must read it back from disk with the sentinel intact -- proving
 \ the writeback + page-in went all the way to the device.
 evict_rt {
-40 lit alloc dsinit                  \ ( ds )
+4C lit alloc dsinit                  \ ( ds )
 1 lit bp_init                        \ ( bp )  single-frame pool
 20 lit bp_alloc                      \ ( bp framep )  fresh page 0x20 (dirty, pinned)
 DEADBEEF lit over !                  \ framep.data[0] = sentinel
@@ -46,7 +46,7 @@ drop
 \ recovers the higher-counter slot from disk -> a 2nd commit flips slot 1->0 ->
 \ a torn commit (live slot zeroed) makes boot fall back to the older valid slot.
 mt_cycle {
-40 lit alloc dsinit                  \ ( ds )
+4C lit alloc dsinit                  \ ( ds )
 200 lit alloc dup mt_z               \ ( ds zbuf )
 over 0 lit 2 lit pick mt_wr          \ zero meta page 0 (force genesis)
 over 1 lit 2 lit pick mt_wr          \ zero meta page 1
@@ -84,7 +84,7 @@ dup C lit + @ 1 lit asrt_eq                \ fell back to slot 1
 \ pool over the same disk then boots the committed meta and reads that page back from
 \ disk -- proving the whole txn (data pages + meta flip) is durable.
 tx_rt {
-40 lit alloc dsinit
+4C lit alloc dsinit
 200 lit alloc dup mt_z
 over 0 lit 2 lit pick mt_wr
 over 1 lit 2 lit pick mt_wr
@@ -110,7 +110,7 @@ bp_unpin drop drop drop              \ ( )
 \ the committed working state (root + next_page) must be exactly restored, touching
 \ no disk.
 tx_rb {
-40 lit alloc dsinit
+4C lit alloc dsinit
 200 lit alloc dup mt_z
 over 0 lit 2 lit pick mt_wr
 over 1 lit 2 lit pick mt_wr

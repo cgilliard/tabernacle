@@ -1,0 +1,80 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ tests/disk_bench.fam — STANDALONE load test for the disk layer ONLY (src/disk.fam).
+\ No store/trie/pmmr on top — measures the RAW virtio-blk ring so we get an isolated,
+\ lockable number for the bottom of the stack.
+\
+\   ./tools/fam src/fence.fam src/disk.fam tests/disk_bench.fam -o bin/disk_bench.bin
+\   ./tools/q32 --disk=scratch.img bin/disk_bench.bin
+\
+\ Workload: dN reads of dSZ contiguous sectors each, spread across dSEC sectors, driven
+\ PIPELINED at batch depth dD (issue dD reads in flight, reap them, repeat).  Two knobs:
+\   dD  — in-flight depth (overlaps the ~35us virtio traps); bounded by nslots
+\   dSZ — sectors per read (amortizes the trap over more bytes)
+\ Reports elapsed ticks + us/op (CLINT mtime: 1 tick = 100 ns).  Throughput is computed
+\ offline from (dN * dSZ * 512 bytes) / (elapsed/10 us).
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ ── parameters (edit + rebuild to sweep) ──
+: dN    2710 lit ;     \ total reads (10000)
+: dD    5 lit ;        \ batch depth / in-flight count
+: dSZ   1 lit ;        \ sectors per read
+: dSEC  10000 lit ;    \ sector range to spread reads over (65536)
+: dSC0  3 lit ;        \ first sector
+
+\ ── run state ──
+: _ds  variable ;
+: _buf variable ;      \ base of dD landing buffers, each dSZ*512 bytes
+: _ids variable ;      \ array of dD in-flight slot ids
+: _ctr variable ;      \ rolling sector counter
+: _t0  variable ;
+
+\ ── bnow ( -- ticks )  CLINT mtime low word (QEMU virt: 10 MHz, 100 ns/tick) ──
+: bnow
+B7C20002 ,   \ lui t0,0x0200C
+03A382FF ,   \ lw  t1,-8(t0)
+1301C1FF ,   \ addi sp,sp,-4
+23206100 ,   \ sw  t1,0(sp)
+;
+
+\ ══════════════════════════════════════════════════════════════════════════════
+\ main
+\ ══════════════════════════════════════════════════════════════════════════════
+4C lit alloc                                       \ ds
+0 lit over 8 lit + !  0 lit over C lit + !  0 lit over 10 lit + !
+C000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+find_blk over !
+vblkinit
+_ds !
+
+\ landing buffers (dD * dSZ*512, page-aligned) + id array + counter
+dD dSZ * 200 lit * 1000 lit + alloc FFF lit + FFFFF000 lit and _buf !
+dD 4 lit * alloc _ids !
+0 lit _ctr !
+
+"disk bench: " puts dN u. " reads x " puts dSZ u. " sectors, depth " puts dD u. 0A lit putc
+bnow _t0 !
+
+dN dD / 0 lit do                                   \ dN/dD batches of dD
+  \ ── issue dD reads, all in flight ──
+  dD 0 lit do
+    _ds @
+    _ctr @ dSEC % dSC0 +                           \ sector = ctr mod range + base
+    _buf @ i dSZ * 200 lit * +                     \ landing buffer i
+    dSZ                                            \ nsec
+    vreadn                                         \ ( ds id )
+    _ids @ i 4 lit * + !                           \ ids[i] = id
+    drop                                           \ drop ds
+    _ctr @ 1 lit + _ctr !
+  loop
+  \ ── reap the batch ──
+  dD 0 lit do
+    _ds @ _ids @ i 4 lit * + @ vwait 2drop
+  loop
+loop
+
+bnow _t0 @ -                                       \ ( elapsed_ticks )
+"loop: " puts dup u. " ticks, " puts
+dup 2710 lit / u. " ms, " puts                     \ 10000 ticks = 1 ms
+dN / 0A lit / u. " us/op\n" puts                   \ (elapsed/ops)/10 = us/op
+"DISK BENCH DONE\n" puts
+bye

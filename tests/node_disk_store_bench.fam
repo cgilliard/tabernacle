@@ -1,0 +1,190 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ tests/node_disk_store_bench.fam — STANDALONE load/endurance bench for the COW
+\ store layer ONLY (src/node_disk_store.fam: pool + meta + allocator + txn).  This
+\ is a top-level PROGRAM, not a Test{} block, so it runs independently:
+\
+\   ./tools/fam src/fence.fam src/disk.fam src/node_disk_store.fam \
+\               tests/node_disk_store_bench.fam -o bin/bench_store.bin
+\   ./tools/q32 --disk=scratch.img bin/bench_store.bin
+\
+\ Drivers:  scripts/bench_store.sh (one shot, fresh disk),
+\           scripts/endure_store.sh (loop on a persistent disk).
+\
+\ WORKLOAD ("counter pages") — designed to turn any pool/commit/recovery bug into a
+\ loud failure, while rewriting a BOUNDED page set in place (so it never grows the
+\ disk and can run forever, sidestepping the not-yet-built free-list):
+\   page 2          header: word0=MAGIC, word1=run_count, word2=committed total
+\   pages 3..3+M-1  data:   word0=page#, word1=counter, word2=hash(page#,counter)
+\ Integrity:
+\   * word0==page#            -> catches wrong-sector reads / writes
+\   * word2==hash(word0,word1)-> catches per-page value corruption / torn writeback
+\   * Σ counters == total     -> catches lost writes (across evictions, commits, AND
+\                                process restarts: the header's committed total is
+\                                re-checked against the on-disk sum every run)
+\ Access is RANDOM (LCG) over a page set far larger than the pool (128 pages, 16
+\ frames), so most accesses miss -> page-in + evict + writeback: node-like random
+\ read/write pressure on the exact paths the small unit tests don't reach.  (Writes
+\ are still in-place, not COW + growth -- that pattern lives in the trie-level bench.)
+\
+\ Fresh disk -> genesis (init + commit).  Persistent disk -> recover (verify every
+\ prior commit) + extend.  Prints "BENCH PASS total=<n>" or aborts via bfail (exit 1).
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ ── parameters ──
+: bMAG  42454E43 lit ;          \ "BENC" header magic
+: bNF   800 lit ;
+: bM    10000 lit ;
+: bP0   3 lit ;                 \ first data page (page 2 = header)
+: bK    2710 lit ;              \ increments per run (10000)
+: bCMT  64 lit ;                \ commit every 100
+: bRLB  3E8 lit ;               \ rollback self-check every 1000
+
+\ ── run state ──
+: _be variable ;                \ engine handle under test
+: _bt variable ;                \ running total of increments
+: _t0 variable ;                \ timer start (CLINT mtime ticks)
+: _rs variable ;                \ PRNG state (LCG)
+
+\ ── bnow ( -- ticks )  read CLINT mtime low word (QEMU virt: 10 MHz, 100 ns/tick) ──
+: bnow
+B7C20002 ,   \ lui t0,0x0200C
+03A382FF ,   \ lw  t1,-8(t0)   (mtime low @ 0x0200BFF8)
+1301C1FF ,   \ addi sp,sp,-4
+23206100 ,   \ sw  t1,0(sp)
+;
+
+\ ── brand ( -- idx )  glibc LCG; return a random data-page index in [0,bM) using the
+\ high bits (the LCG's low bits are weakly random) ──
+: brand
+_rs @ 41C64E6D lit * 3039 lit + dup _rs !    \ seed = seed*1103515245 + 12345
+10 lit rshift bM %                           \ (seed >> 16) mod bM
+;
+
+\ ── bfail ( -- )  print failure + exit 1 (SiFive finisher, from lib/test.fam) ──
+: bfail
+"BENCH FAIL\n" puts
+B7021000 ,
+37330100 ,
+13033333 ,
+23A06200 ,
+6F000000 ,
+;
+
+\ ── bhash ( p counter -- h )  per-page check word ──
+: bhash  9E3779B1 lit *  swap 85EBCA77 lit * xor ;
+
+\ ── bframe ( eng page -- framep )  pinned frame for a page (page-in or hit) ──
+: bframe  swap @ swap bp_get nip ;
+
+\ ── bchk ( framep page -- framep )  verify word0==page and word2==hash; abort if not ──
+: bchk
+over @ over <> if bfail then drop
+dup @ over 4 lit + @ bhash over 8 lit + @ <> if bfail then
+;
+
+\ ── bwr ( framep page counter -- )  write the page's three words, dirty, unpin ──
+: bwr
+2dup bhash 3 lit pick 8 lit + !        \ word2 = hash(page,counter)
+2 lit pick 4 lit + !                   \ word1 = counter
+over !                                 \ word0 = page
+dup bp_dirty bp_unpin
+;
+
+\ ── bverify ( eng page -- counter )  page-in, verify integrity, return its counter ──
+: bverify
+2dup bframe over bchk
+dup 4 lit + @ swap bp_unpin nip nip
+;
+
+\ ── binc ( eng page -- )  verify then counter++ (recompute hash), dirty, unpin ──
+: binc
+2dup bframe over bchk
+dup 4 lit + dup @ 1 lit + swap !        \ counter++
+dup @ over 4 lit + @ bhash over 8 lit + !   \ word2 = hash(word0,word1)
+dup bp_dirty bp_unpin 2drop
+;
+
+\ ── binit ( -- )  genesis: write the header + all data pages (counter 0), commit ──
+: binit
+_be @ 2 lit bframe
+bMAG over !  0 lit over 4 lit + !  0 lit over 8 lit + !
+dup bp_dirty bp_unpin
+bM 0 lit do
+  _be @ bP0 i + bframe
+  bP0 i + 0 lit bwr
+loop
+_be @ commit
+;
+
+\ ── bverall ( -- )  verify the header + every data page, confirm Σcounters ==
+\ header.total (the cross-run lost-write check), and load total into _bt ──
+: bverall
+_be @ 2 lit bframe
+dup @ bMAG <> if bfail then
+dup 8 lit + @ swap bp_unpin             \ ( total )
+0 lit                                   \ ( total sum )
+bM 0 lit do
+  _be @ bP0 i + bverify +
+loop
+over <> if bfail then                   \ Σ == total ?  (over+<> leave ( total flag ))
+_bt !                                   \ _bt = total
+;
+
+\ ── brbck ( -- )  rollback self-check: an uncommitted increment must fully revert ──
+: brbck
+_be @ bP0 bverify                       \ pre
+_be @ tx_begin
+_be @ bP0 binc                          \ uncommitted change
+_be @ rollback
+_be @ bP0 bverify                       \ post
+<> if bfail then
+;
+
+\ ══════════════════════════════════════════════════════════════════════════════
+\ main
+\ ══════════════════════════════════════════════════════════════════════════════
+4C lit alloc                            \ ds
+0 lit over 8 lit + !  0 lit over C lit + !  0 lit over 10 lit + !
+C000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+find_blk over !
+vblkinit                                \ ( ds )
+bNF eng_init                            \ ( eng )
+dup mt_boot _be !                       \ ( )
+
+\ genesis (fresh disk) or recover (persistent)?
+_be @ 2 lit bframe dup @ bMAG <> swap bp_unpin
+if
+  "bench: genesis init\n" puts
+  binit  0 lit _bt !
+else
+  "bench: recover + verify prior\n" puts
+  bverall
+then
+
+"bench: running " puts bK u. " increments (M=" puts bM u. " pool=" puts bNF u. ", random)\n" puts
+bnow _rs !                              \ seed PRNG (varies per run -> different pattern each round)
+bnow _t0 !
+bK 0 lit do
+  _be @ bP0 brand +  binc              \ RANDOM page (LCG), node-like access
+  _bt @ 1 lit + _bt !
+  i bCMT % 0 lit = if _be @ commit then
+  i bRLB % 0 lit = if brbck then
+loop
+bnow _t0 @ -                            \ ( elapsed_ticks )
+"loop: " puts dup u. " ticks, " puts
+dup 2710 lit / u. " ms, " puts          \ 10000 ticks = 1 ms
+bK / u. " ticks/incr\n" puts            \ elapsed / increments
+
+\ finalize: stamp header.total + run_count, commit
+_be @ 2 lit bframe
+_bt @ over 8 lit + !
+dup 4 lit + dup @ 1 lit + swap !
+dup bp_dirty bp_unpin
+_be @ commit
+
+\ reboot to a FRESH pool over the same disk, then verify everything from disk
+_be @ eng_ds bNF eng_init dup mt_boot _be !
+bverall
+
+"BENCH PASS total=" puts _bt @ u. 0A lit putc
+bye

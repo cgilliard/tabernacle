@@ -434,7 +434,7 @@ begin
   2drop                                \ ( ctx )
   4C lit alloc                         \ ds ( ctx ds )
   0 lit over 8 lit + !  0 lit over C lit + !  0 lit over 10 lit + !  0 lit over 44 lit + !
-  5000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+  C000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
   find_blk over !  vblkinit
   over C lit + !                       \ ctx+C = ds ( ctx )
   100 lit alloc over 10 lit + !        \ ctx+10 = scr (>=0x100 for texpand layout)
@@ -496,7 +496,7 @@ swap 1 lit = if                \ ( ns )
   0 lit over C lit + !           \ ds.usd   = 0
   0 lit over 10 lit + !          \ ds.next  = 0
   0 lit over 44 lit + !          \ ds.phase = 0 (WRITING)
-  5000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !   \ ds.qb (page-aligned, zeroed)
+  C000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !   \ ds.qb (page-aligned, zeroed)
   find_blk over !                \ ds.dev = virtio-blk dev
   vblkinit
   over 18 lit + @ 1FF lit + 9 lit rshift over 40 lit + !   \ ds.nsec = roundup(img_size,512)
@@ -527,7 +527,7 @@ ds_machine {
 4C lit alloc                         \ ( ns ds )
 100 lit alloc over !                 \ ds.dev (scratch)
 200 lit over @ 10 lit + !            \ dev DeviceFeatures = FLUSH offered (writeback)
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ ds.qb
+C000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ ds.qb
 0 lit over 8 lit + !                 \ subd 0
 0 lit over C lit + !                 \ usd 0
 0 lit over 10 lit + !                \ next 0
