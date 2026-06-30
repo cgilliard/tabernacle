@@ -71,36 +71,3 @@ patch_config() {
 
 run bin/fam0 fam0.seed src/fam0.fam0
 cmp ./bin/fam0 ./fam0.seed || { echo "fam0: binaries don't match!"; exit 1; }
-run bin/fam.uncompressed bin/fam0 src/fam.fam0
-run bin/fampack bin/fam.uncompressed lib/stdlib.fam lib/asm.fam src/fampack.fam
-pack bin/fam.uncompressed bin/fam
-run bin/gen_hash bin/fam lib/stdlib.fam lib/asm.fam src/gen_hash.fam
-run bin/tabernacle.uncompressed bin/fam0 src/tabernacle.fam0
-run bin/full_node.bin \
-	bin/fam \
-	lib/stdlib.fam \
-	lib/build.fam \
-	src/fence.fam \
-	src/babybear.fam \
-	src/babybear_im.fam \
-	src/poseidon2.fam \
-	src/wotsp.fam \
-	src/tx.fam \
-	src/merkle.fam \
-	src/bb4.fam \
-	src/frifold.fam \
-	src/transcript.fam \
-	src/frivfy.fam \
-	src/pow.fam \
-	src/blake2s.fam \
-	src/tblexpand.fam \
-	src/disk.fam \
-	src/node_disk_store.fam \
-	src/node_disk_trie.fam \
-	src/net.fam \
-	src/node_serve.fam \
-	src/full_node.fam
-cat resources/bible.compressed >> bin/full_node.bin
-patch_config bin/tabernacle.uncompressed bin/full_node.bin
-pack bin/tabernacle.uncompressed bin/tabernacle
-
