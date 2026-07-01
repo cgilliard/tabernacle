@@ -1,0 +1,9 @@
+\ hello.fam — print "hello\n" using char literals + lit + putc, then bye.
+
+'h' lit  putc
+'e' lit  putc
+'l' lit  putc
+'l' lit  putc
+'o' lit  putc
+'\n' lit putc
+bye
