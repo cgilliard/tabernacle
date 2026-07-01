@@ -7,3 +7,9 @@
 'o' lit  putc
 '\n' lit putc
 bye
+
+Test {
+	t0 {
+		2 lit 3 lit + 5 lit asrt_eq
+	}
+}
