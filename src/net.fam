@@ -3,101 +3,101 @@
 
 \ ===== checksums =====
 : ip_csum
-0 lit swap
-dup c@ 8 lit lshift over 1 lit + c@ or rot + swap
-dup 2 lit + c@ 8 lit lshift over 3 lit + c@ or rot + swap
-dup 4 lit + c@ 8 lit lshift over 5 lit + c@ or rot + swap
-dup 6 lit + c@ 8 lit lshift over 7 lit + c@ or rot + swap
-dup 8 lit + c@ 8 lit lshift over 9 lit + c@ or rot + swap
-dup A lit + c@ 8 lit lshift over B lit + c@ or rot + swap
-dup C lit + c@ 8 lit lshift over D lit + c@ or rot + swap
-dup E lit + c@ 8 lit lshift over F lit + c@ or rot + swap
-dup 10 lit + c@ 8 lit lshift over 11 lit + c@ or rot + swap
-dup 12 lit + c@ 8 lit lshift over 13 lit + c@ or rot + swap
-drop
-dup 10 lit rshift swap FFFF lit and +
-dup 10 lit rshift swap FFFF lit and +
-invert FFFF lit and
+	0 lit swap
+	dup c@ 8 lit lshift over 1 lit + c@ or rot + swap
+	dup 2 lit + c@ 8 lit lshift over 3 lit + c@ or rot + swap
+	dup 4 lit + c@ 8 lit lshift over 5 lit + c@ or rot + swap
+	dup 6 lit + c@ 8 lit lshift over 7 lit + c@ or rot + swap
+	dup 8 lit + c@ 8 lit lshift over 9 lit + c@ or rot + swap
+	dup A lit + c@ 8 lit lshift over B lit + c@ or rot + swap
+	dup C lit + c@ 8 lit lshift over D lit + c@ or rot + swap
+	dup E lit + c@ 8 lit lshift over F lit + c@ or rot + swap
+	dup 10 lit + c@ 8 lit lshift over 11 lit + c@ or rot + swap
+	dup 12 lit + c@ 8 lit lshift over 13 lit + c@ or rot + swap
+	drop
+	dup 10 lit rshift swap FFFF lit and +
+	dup 10 lit rshift swap FFFF lit and +
+	invert FFFF lit and
 ;
 
 \ ===== device discovery + memory helpers =====
 : find_net
-10008000 lit
-begin dup 8 lit + @ 1 lit <> while
-1000 lit -
-dup 10001000 lit u< if "no net\n" puts bye then
-repeat
+	10008000 lit
+	begin dup 8 lit + @ 1 lit <> while
+		1000 lit -
+		dup 10001000 lit u< if "no net\n" puts bye then
+	repeat
 ;
 
 : wzero
-begin dup 0 lit > while
-swap dup 0 lit swap ! 4 lit + swap 1 lit -
-repeat drop drop
+	begin dup 0 lit > while
+		swap dup 0 lit swap ! 4 lit + swap 1 lit -
+	repeat drop drop
 ;
 
 : mcopy1
-over c@ over c!
-1 lit + swap 1 lit + swap
+	over c@ over c!
+	1 lit + swap 1 lit + swap
 ;
 
 : mcopy
-begin dup 0 lit > while
-1 lit -
-rot rot mcopy1 rot
-repeat
-drop drop drop
+	begin dup 0 lit > while
+		1 lit -
+		rot rot mcopy1 rot
+	repeat
+	drop drop drop
 ;
 
 \ ===== virtio-net device + queue bring-up =====
 : net_init
-dup 4 lit + @ 800 lit wzero
-dup 8 lit + @ 800 lit wzero
-dup @
-dup 70 lit + 0 lit swap !
-dup 70 lit + 1 lit swap !
-dup dup 70 lit + @ 2 lit or swap 70 lit + !
-dup 20 lit + 0 lit swap !
-dup dup 70 lit + @ 8 lit or swap 70 lit + !
-dup 28 lit + 1000 lit swap !
-dup 30 lit + 0 lit swap !
-dup 38 lit + 10 lit swap !
-dup 3C lit + 1000 lit swap !
-over 4 lit + @ C lit rshift over 40 lit + !
-dup 30 lit + 1 lit swap !
-dup 38 lit + 2 lit swap !
-dup 3C lit + 1000 lit swap !
-over 8 lit + @ C lit rshift over 40 lit + !
-dup dup 70 lit + @ 4 lit or swap 70 lit + !
-drop
+	dup 4 lit + @ 800 lit wzero
+	dup 8 lit + @ 800 lit wzero
+	dup @
+	dup 70 lit + 0 lit swap !
+	dup 70 lit + 1 lit swap !
+	dup dup 70 lit + @ 2 lit or swap 70 lit + !
+	dup 20 lit + 0 lit swap !
+	dup dup 70 lit + @ 8 lit or swap 70 lit + !
+	dup 28 lit + 1000 lit swap !
+	dup 30 lit + 0 lit swap !
+	dup 38 lit + 10 lit swap !
+	dup 3C lit + 1000 lit swap !
+	over 4 lit + @ C lit rshift over 40 lit + !
+	dup 30 lit + 1 lit swap !
+	dup 38 lit + 2 lit swap !
+	dup 3C lit + 1000 lit swap !
+	over 8 lit + @ C lit rshift over 40 lit + !
+	dup dup 70 lit + @ 4 lit or swap 70 lit + !
+	drop
 ;
 
 : rx_setup
-0 lit over 24 lit + !
-begin
-  dup 24 lit + @ 10 lit <
-while
-  dup 4 lit + @
-  over 24 lit + @ 4 lit lshift +
-  over 28 lit + !
-  dup C lit + @
-  over 24 lit + @
-  dup A lit lshift swap 9 lit lshift +
-  +
-  over 28 lit + @ !
-  dup 28 lit + @ 4 lit + 0 lit swap !
-  600 lit over 28 lit + @ 8 lit + !
-  2 lit over 28 lit + @ C lit + h!
-  0 lit over 28 lit + @ E lit + h!
-  dup 24 lit + @
-  over 4 lit + @ 104 lit +
-  over 1 lit lshift +
-  swap over h!
-  drop
-  dup 24 lit + dup @ 1 lit + swap !
-repeat
-dup 4 lit + @
-dup 100 lit + 0 lit swap h!
-102 lit + 10 lit swap h!
+	0 lit over 24 lit + !
+	begin
+		dup 24 lit + @ 10 lit <
+	while
+		dup 4 lit + @
+		over 24 lit + @ 4 lit lshift +
+		over 28 lit + !
+		dup C lit + @
+		over 24 lit + @
+		dup A lit lshift swap 9 lit lshift +
+		+
+		over 28 lit + @ !
+		dup 28 lit + @ 4 lit + 0 lit swap !
+		600 lit over 28 lit + @ 8 lit + !
+		2 lit over 28 lit + @ C lit + h!
+		0 lit over 28 lit + @ E lit + h!
+		dup 24 lit + @
+		over 4 lit + @ 104 lit +
+		over 1 lit lshift +
+		swap over h!
+		drop
+		dup 24 lit + dup @ 1 lit + swap !
+	repeat
+	dup 4 lit + @
+	dup 100 lit + 0 lit swap h!
+	102 lit + 10 lit swap h!
 ;
 
 \ ══════════════════════════════════════════════════════════════════════════════
@@ -107,197 +107,197 @@ dup 100 lit + 0 lit swap h!
 \ rx_poll ( ns -- ns frame|0 )  if a packet is waiting, record its frame ptr at
 \ ns+0x34 and its RX desc id at ns+0x38, and return the frame ptr; else return 0.
 : rx_poll
-dup 4 lit + @ 1002 lit + h@          \ RX used.idx
-over 20 lit + @                      \ rx_last
-<> if
-  dup 20 lit + @ F lit and 3 lit lshift
-  over 4 lit + @ + 1004 lit + @       \ used.ring[rx_last & 15].id
-  over 38 lit + !                     \ ns+0x38 = desc id
-  dup 38 lit + @
-  dup A lit lshift swap 9 lit lshift +
-  over C lit + @ +                    \ rx_bufs + id*0x600
-  over 34 lit + !                     \ ns+0x34 = frame
-  dup 34 lit + @
-else
-  0 lit
-then
+	dup 4 lit + @ 1002 lit + h@   \ RX used.idx
+	over 20 lit + @               \ rx_last
+	<> if
+		dup 20 lit + @ F lit and 3 lit lshift
+		over 4 lit + @ + 1004 lit + @   \ used.ring[rx_last & 15].id
+		over 38 lit + !                 \ ns+0x38 = desc id
+		dup 38 lit + @
+		dup A lit lshift swap 9 lit lshift +
+		over C lit + @ +                \ rx_bufs + id*0x600
+		over 34 lit + !                 \ ns+0x34 = frame
+		dup 34 lit + @
+	else
+		0 lit
+	then
 ;
 
 \ rx_done ( ns -- ns )  re-post the just-consumed RX buffer to the avail ring + kick,
 \ and advance rx_last.  Call once you are finished reading the frame.
 : rx_done
-dup 4 lit + @ 102 lit + h@
-over 28 lit + !
-dup 28 lit + @ F lit and 1 lit lshift
-over 4 lit + @ + 104 lit +
-over 38 lit + @ swap h!
-dup 28 lit + @ 1 lit +
-over 4 lit + @ 102 lit + h!
-dup @ 50 lit + 0 lit swap !
-dup 20 lit + @ 1 lit + FFFF lit and
-over 20 lit + !
+	dup 4 lit + @ 102 lit + h@
+	over 28 lit + !
+	dup 28 lit + @ F lit and 1 lit lshift
+	over 4 lit + @ + 104 lit +
+	over 38 lit + @ swap h!
+	dup 28 lit + @ 1 lit +
+	over 4 lit + @ 102 lit + h!
+	dup @ 50 lit + 0 lit swap !
+	dup 20 lit + @ 1 lit + FFFF lit and
+	over 20 lit + !
 ;
 
 \ tx_post ( ns -- ns )  hand the frame in tx_buf (length ns+0x24) to the TX queue and
 \ ring the doorbell.  Returns immediately — does NOT wait for the transmit to drain.
 : tx_post
-dup 1C lit + dup @ 1 lit + swap !
-dup 8 lit + @
-over 10 lit + @ over !
-dup 4 lit + 0 lit swap !
-over 24 lit + @ over 8 lit + !
-dup C lit + 0 lit swap h!
-dup E lit + 0 lit swap h!
-dup 20 lit + 0 lit swap h!
-dup 24 lit + 0 lit swap h!
-dup 26 lit + 0 lit swap h!
-over 1C lit + @ over 22 lit + h!
-drop
-fence_io
-dup @ 50 lit + 1 lit swap !
+	dup 1C lit + dup @ 1 lit + swap !
+	dup 8 lit + @
+	over 10 lit + @ over !
+	dup 4 lit + 0 lit swap !
+	over 24 lit + @ over 8 lit + !
+	dup C lit + 0 lit swap h!
+	dup E lit + 0 lit swap h!
+	dup 20 lit + 0 lit swap h!
+	dup 24 lit + 0 lit swap h!
+	dup 26 lit + 0 lit swap h!
+	over 1C lit + @ over 22 lit + h!
+	drop
+	fence_io
+	dup @ 50 lit + 1 lit swap !
 ;
 
 \ tx_post2 ( ns -- ns )  zero-copy two-descriptor post: desc[0] is the 0x3B-byte header
 \ in tx_buf, desc[1] is the payload BY REFERENCE (addr ns+0x3C, len ns+0x30) — no copy.
 \ Rings the doorbell and returns immediately; does NOT wait for the transmit.
 : tx_post2
-dup 1C lit + dup @ 1 lit + swap !
-dup 8 lit + @
-over 10 lit + @ over !
-dup 4 lit + 0 lit swap !
-3B lit over 8 lit + !
-dup C lit + 1 lit swap h!
-dup E lit + 1 lit swap h!
-over 3C lit + @ over 10 lit + !
-dup 14 lit + 0 lit swap !
-over 30 lit + @ over 18 lit + !
-dup 1C lit + 0 lit swap h!
-dup 1E lit + 0 lit swap h!
-dup 20 lit + 0 lit swap h!
-dup 24 lit + 0 lit swap h!
-dup 26 lit + 0 lit swap h!
-over 1C lit + @ over 22 lit + h!
-drop
-fence_io
-dup @ 50 lit + 1 lit swap !
+	dup 1C lit + dup @ 1 lit + swap !
+	dup 8 lit + @
+	over 10 lit + @ over !
+	dup 4 lit + 0 lit swap !
+	3B lit over 8 lit + !
+	dup C lit + 1 lit swap h!
+	dup E lit + 1 lit swap h!
+	over 3C lit + @ over 10 lit + !
+	dup 14 lit + 0 lit swap !
+	over 30 lit + @ over 18 lit + !
+	dup 1C lit + 0 lit swap h!
+	dup 1E lit + 0 lit swap h!
+	dup 20 lit + 0 lit swap h!
+	dup 24 lit + 0 lit swap h!
+	dup 26 lit + 0 lit swap h!
+	over 1C lit + @ over 22 lit + h!
+	drop
+	fence_io
+	dup @ 50 lit + 1 lit swap !
 ;
 
 \ tx_busy ( ns -- ns flag )  pure status read: is the last posted frame still in
 \ flight?  (tx_aidx != TX used.idx)  This is what used to be a blocking spin.
 : tx_busy
-dup 1C lit + @ FFFF lit and
-over 8 lit + @ 1002 lit + h@
-<>
+	dup 1C lit + @ FFFF lit and
+	over 8 lit + @ 1002 lit + h@
+	<>
 ;
 
 Test {
-\ ip_csum of an all-zero 20-byte header is 0xFFFF (sum 0 -> ~0 & 0xFFFF).
-csum0 {
-14 lit alloc                         \ ( hdr )  20 bytes
-dup 0 lit swap !  dup 4 lit + 0 lit swap !  dup 8 lit + 0 lit swap !
-dup C lit + 0 lit swap !  dup 10 lit + 0 lit swap !
-ip_csum FFFF lit asrt_eq             \ ( consumes hdr )
-}
-\ ip_csum with only the first halfword = 0x4500 is ~0x4500 & 0xFFFF = 0xBAFF.
-csumv {
-14 lit alloc
-dup 0 lit swap !  dup 4 lit + 0 lit swap !  dup 8 lit + 0 lit swap !
-dup C lit + 0 lit swap !  dup 10 lit + 0 lit swap !
-45 lit over c!                       \ byte0 = 0x45
-0 lit over 1 lit + c!                \ byte1 = 0x00  -> halfword 0x4500
-ip_csum BAFF lit asrt_eq             \ ( consumes hdr )
-}
-\ tx_busy: tx_aidx != TX used.idx -> still draining (flag 1).
-busy {
-100 lit alloc                        \ ( ns )
-5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !   \ tx_q (aligned)
-5 lit over 1C lit + !                \ tx_aidx = 5
-3 lit over 8 lit + @ 1002 lit + h!   \ TX used.idx = 3  (!= aidx)
-tx_busy if 1 lit else 0 lit then 1 lit asrt_eq   \ busy (normalize the boolean)
-drop                                 \ ( consumes ns )
-}
-\ tx_busy: tx_aidx == TX used.idx -> drained (flag 0).
-idle {
-100 lit alloc
-5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !
-5 lit over 1C lit + !
-5 lit over 8 lit + @ 1002 lit + h!   \ used.idx = 5 == aidx
-tx_busy if 1 lit else 0 lit then 0 lit asrt_eq   \ idle
-drop
-}
-\ tx_post builds desc[0] (addr=tx_buf, len=tx_len, flags 0), sets avail.idx, bumps
-\ tx_aidx, and rings the doorbell (QueueNotify q1 = 1).
-post1 {
-100 lit alloc
-5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !   \ tx_q
-100 lit alloc over !                 \ dev (QueueNotify scratch)
-40000000 lit over 10 lit + !         \ tx_buf
-2A lit over 24 lit + !               \ tx_len = 0x2A
-7 lit over 1C lit + !                \ tx_aidx = 7
-tx_post
-dup 8 lit + @ @ 40000000 lit asrt_eq            \ desc0.addr = tx_buf
-dup 8 lit + @ 8 lit + @ 2A lit asrt_eq          \ desc0.len  = tx_len
-dup 8 lit + @ C lit + h@ 0 lit asrt_eq          \ desc0.flags = 0
-dup 8 lit + @ 22 lit + h@ 8 lit asrt_eq         \ avail.idx = 8
-dup 1C lit + @ 8 lit asrt_eq                    \ tx_aidx 7 -> 8
-dup @ 50 lit + @ 1 lit asrt_eq                  \ QueueNotify wrote 1
-drop                                 \ ( consumes ns )
-}
-\ tx_post2 builds the zero-copy 2-descriptor chain: desc0 = 0x3B-byte header (NEXT,
-\ next=1), desc1 = payload BY REFERENCE (addr ns+0x3C, len ns+0x30).
-post2 {
-100 lit alloc
-5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !
-100 lit alloc over !
-40000000 lit over 10 lit + !         \ tx_buf (header)
-50000000 lit over 3C lit + !         \ zero-copy payload addr
-578 lit over 30 lit + !              \ payload length
-0 lit over 1C lit + !                \ tx_aidx 0
-tx_post2
-dup 8 lit + @ @ 40000000 lit asrt_eq            \ desc0.addr = tx_buf
-dup 8 lit + @ 8 lit + @ 3B lit asrt_eq          \ desc0.len  = 0x3B
-dup 8 lit + @ C lit + h@ 1 lit asrt_eq          \ desc0.flags = NEXT
-dup 8 lit + @ E lit + h@ 1 lit asrt_eq          \ desc0.next  = 1
-dup 8 lit + @ 10 lit + @ 50000000 lit asrt_eq   \ desc1.addr = payload (no copy)
-dup 8 lit + @ 18 lit + @ 578 lit asrt_eq        \ desc1.len  = payload len
-dup @ 50 lit + @ 1 lit asrt_eq                  \ QueueNotify wrote 1
-drop
-}
-\ rx_poll: device posted a packet (used.idx advanced) -> return frame ptr and record
-\ desc id at ns+0x38 + frame at ns+0x34.  frame = rx_bufs + id*0x600.
-rxp {
-100 lit alloc
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ rx_q
-80000000 lit over C lit + !          \ rx_bufs
-0 lit over 20 lit + !                \ rx_last = 0
-1 lit over 4 lit + @ 1002 lit + h!   \ RX used.idx = 1 (!= rx_last)
-3 lit over 4 lit + @ 1004 lit + !    \ used.ring[0].id = 3
-rx_poll 80001200 lit asrt_eq         \ frame = rx_bufs + 3*0x600 = 0x80001200
-dup 38 lit + @ 3 lit asrt_eq         \ ns+0x38 = desc id 3
-34 lit + @ 80001200 lit asrt_eq      \ ns+0x34 = frame  ( consumes ns )
-}
-\ rx_poll: nothing waiting (used.idx == rx_last) -> 0.
-rxe {
-100 lit alloc
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
-5 lit over 20 lit + !                \ rx_last = 5
-5 lit over 4 lit + @ 1002 lit + h!   \ used.idx = 5 == rx_last
-rx_poll 0 lit asrt_eq
-drop
-}
-\ rx_done re-posts the consumed RX desc id to the avail ring, bumps avail.idx + rx_last,
-\ and kicks (QueueNotify q0 = 0).
-rxd {
-100 lit alloc
-5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ rx_q
-100 lit alloc over !                 \ dev
-3 lit over 38 lit + !                \ consumed desc id = 3
-0 lit over 20 lit + !                \ rx_last = 0
-0 lit over 4 lit + @ 102 lit + h!    \ RX avail.idx = 0
-rx_done
-dup 4 lit + @ 104 lit + h@ 3 lit asrt_eq     \ avail.ring[0] = desc 3 (re-posted)
-dup 4 lit + @ 102 lit + h@ 1 lit asrt_eq     \ avail.idx -> 1
-dup @ 50 lit + @ 0 lit asrt_eq               \ QueueNotify wrote 0
-20 lit + @ 1 lit asrt_eq                      \ rx_last -> 1  ( consumes ns )
-}
+	\ ip_csum of an all-zero 20-byte header is 0xFFFF (sum 0 -> ~0 & 0xFFFF).
+	csum0 {
+		14 lit alloc               \ ( hdr )  20 bytes
+		dup 0 lit swap !  dup 4 lit + 0 lit swap !  dup 8 lit + 0 lit swap !
+		dup C lit + 0 lit swap !  dup 10 lit + 0 lit swap !
+		ip_csum FFFF lit asrt_eq   \ ( consumes hdr )
+	}
+	\ ip_csum with only the first halfword = 0x4500 is ~0x4500 & 0xFFFF = 0xBAFF.
+	csumv {
+		14 lit alloc
+		dup 0 lit swap !  dup 4 lit + 0 lit swap !  dup 8 lit + 0 lit swap !
+		dup C lit + 0 lit swap !  dup 10 lit + 0 lit swap !
+		45 lit over c!             \ byte0 = 0x45
+		0 lit over 1 lit + c!      \ byte1 = 0x00  -> halfword 0x4500
+		ip_csum BAFF lit asrt_eq   \ ( consumes hdr )
+	}
+	\ tx_busy: tx_aidx != TX used.idx -> still draining (flag 1).
+	busy {
+		100 lit alloc                                              \ ( ns )
+		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !   \ tx_q (aligned)
+		5 lit over 1C lit + !                                      \ tx_aidx = 5
+		3 lit over 8 lit + @ 1002 lit + h!                         \ TX used.idx = 3  (!= aidx)
+		tx_busy if 1 lit else 0 lit then 1 lit asrt_eq             \ busy (normalize the boolean)
+		drop                                                       \ ( consumes ns )
+	}
+	\ tx_busy: tx_aidx == TX used.idx -> drained (flag 0).
+	idle {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !
+		5 lit over 1C lit + !
+		5 lit over 8 lit + @ 1002 lit + h!               \ used.idx = 5 == aidx
+		tx_busy if 1 lit else 0 lit then 0 lit asrt_eq   \ idle
+		drop
+	}
+	\ tx_post builds desc[0] (addr=tx_buf, len=tx_len, flags 0), sets avail.idx, bumps
+	\ tx_aidx, and rings the doorbell (QueueNotify q1 = 1).
+	post1 {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !   \ tx_q
+		100 lit alloc over !                                       \ dev (QueueNotify scratch)
+		40000000 lit over 10 lit + !                               \ tx_buf
+		2A lit over 24 lit + !                                     \ tx_len = 0x2A
+		7 lit over 1C lit + !                                      \ tx_aidx = 7
+		tx_post
+		dup 8 lit + @ @ 40000000 lit asrt_eq                       \ desc0.addr = tx_buf
+		dup 8 lit + @ 8 lit + @ 2A lit asrt_eq                     \ desc0.len  = tx_len
+		dup 8 lit + @ C lit + h@ 0 lit asrt_eq                     \ desc0.flags = 0
+		dup 8 lit + @ 22 lit + h@ 8 lit asrt_eq                    \ avail.idx = 8
+		dup 1C lit + @ 8 lit asrt_eq                               \ tx_aidx 7 -> 8
+		dup @ 50 lit + @ 1 lit asrt_eq                             \ QueueNotify wrote 1
+		drop                                                       \ ( consumes ns )
+	}
+	\ tx_post2 builds the zero-copy 2-descriptor chain: desc0 = 0x3B-byte header (NEXT,
+	\ next=1), desc1 = payload BY REFERENCE (addr ns+0x3C, len ns+0x30).
+	post2 {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !
+		100 lit alloc over !
+		40000000 lit over 10 lit + !                    \ tx_buf (header)
+		50000000 lit over 3C lit + !                    \ zero-copy payload addr
+		578 lit over 30 lit + !                         \ payload length
+		0 lit over 1C lit + !                           \ tx_aidx 0
+		tx_post2
+		dup 8 lit + @ @ 40000000 lit asrt_eq            \ desc0.addr = tx_buf
+		dup 8 lit + @ 8 lit + @ 3B lit asrt_eq          \ desc0.len  = 0x3B
+		dup 8 lit + @ C lit + h@ 1 lit asrt_eq          \ desc0.flags = NEXT
+		dup 8 lit + @ E lit + h@ 1 lit asrt_eq          \ desc0.next  = 1
+		dup 8 lit + @ 10 lit + @ 50000000 lit asrt_eq   \ desc1.addr = payload (no copy)
+		dup 8 lit + @ 18 lit + @ 578 lit asrt_eq        \ desc1.len  = payload len
+		dup @ 50 lit + @ 1 lit asrt_eq                  \ QueueNotify wrote 1
+		drop
+	}
+	\ rx_poll: device posted a packet (used.idx advanced) -> return frame ptr and record
+	\ desc id at ns+0x38 + frame at ns+0x34.  frame = rx_bufs + id*0x600.
+	rxp {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ rx_q
+		80000000 lit over C lit + !                                \ rx_bufs
+		0 lit over 20 lit + !                                      \ rx_last = 0
+		1 lit over 4 lit + @ 1002 lit + h!                         \ RX used.idx = 1 (!= rx_last)
+		3 lit over 4 lit + @ 1004 lit + !                          \ used.ring[0].id = 3
+		rx_poll 80001200 lit asrt_eq                               \ frame = rx_bufs + 3*0x600 = 0x80001200
+		dup 38 lit + @ 3 lit asrt_eq                               \ ns+0x38 = desc id 3
+		34 lit + @ 80001200 lit asrt_eq                            \ ns+0x34 = frame  ( consumes ns )
+	}
+	\ rx_poll: nothing waiting (used.idx == rx_last) -> 0.
+	rxe {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+		5 lit over 20 lit + !                \ rx_last = 5
+		5 lit over 4 lit + @ 1002 lit + h!   \ used.idx = 5 == rx_last
+		rx_poll 0 lit asrt_eq
+		drop
+	}
+	\ rx_done re-posts the consumed RX desc id to the avail ring, bumps avail.idx + rx_last,
+	\ and kicks (QueueNotify q0 = 0).
+	rxd {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ rx_q
+		100 lit alloc over !                                       \ dev
+		3 lit over 38 lit + !                                      \ consumed desc id = 3
+		0 lit over 20 lit + !                                      \ rx_last = 0
+		0 lit over 4 lit + @ 102 lit + h!                          \ RX avail.idx = 0
+		rx_done
+		dup 4 lit + @ 104 lit + h@ 3 lit asrt_eq                   \ avail.ring[0] = desc 3 (re-posted)
+		dup 4 lit + @ 102 lit + h@ 1 lit asrt_eq                   \ avail.idx -> 1
+		dup @ 50 lit + @ 0 lit asrt_eq                             \ QueueNotify wrote 0
+		20 lit + @ 1 lit asrt_eq                                   \ rx_last -> 1  ( consumes ns )
+	}
 }
