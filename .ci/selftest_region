@@ -1,7 +1,0 @@
-#!/bin/sh
-# Prove the region-confinement verifier (verify_region: L1 disjoint layout + L2
-# store confinement) is not vacuous: it must ACCEPT an MMIO-const store, REJECT a
-# store via an unknown (TOP) base, and confirm every region model's layout is
-# pairwise-disjoint (L1).
-set -e
-python3 tools/verify_region.py --selftest

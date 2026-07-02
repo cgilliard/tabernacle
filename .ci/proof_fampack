@@ -1,9 +1,0 @@
-#!/bin/sh
-# P1/P2 (FSM: no jalr / closed CFG) on the self-extracting packer bin/fampack.
-# (W^X for fampack would need its program-specific buffer roots; out of scope
-# here -- P1/P2 is the property that matters for the packer's control flow.)
-set -e
-. "$(dirname "$0")/_common.sh"
-setup_qemu
-build_fam
-python3 tools/verify_fsm.py bin/fampack

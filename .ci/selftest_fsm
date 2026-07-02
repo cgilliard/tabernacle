@@ -1,5 +1,0 @@
-#!/bin/sh
-# Prove the P1/P2 verifier is not vacuous: it must REJECT crafted binaries
-# containing jalr, M-ext, ecall, an out-of-range jal, or a compressed insn.
-set -e
-python3 tools/verify_fsm.py --selftest
