@@ -3,11 +3,11 @@
 bin/fam0 compiles into bin/tabernacle.
 
 This is the TABERNACLE generator.  It is deliberately separate from
-tools/s2fam0.py (the fam-compiler generator) because the two targets differ in
-one crucial way:
+tools/s2fam0_fam.py (the fam-compiler generator) because the two targets differ
+in one crucial way:
 
-  * tools/s2fam0.py (fam):  PREPENDS a `13 00 00 00` nop as the q32 magic word,
-    matching scripts/build.sh's injected header for the fam binary.
+  * tools/s2fam0_fam.py (fam):  PREPENDS a `13 00 00 00` nop as the q32 magic
+    word, matching scripts/build.sh's injected header for the fam binary.
   * this tool (tabernacle): prepends NOTHING — src/tabernacle.S supplies its
     own first instruction (`addi zero, zero, 0`, the q32 magic), and the result
     is run through bin/fam0 with no injected header.

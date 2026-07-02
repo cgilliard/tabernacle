@@ -4,7 +4,8 @@
 \   [4 B LE: N] [N bytes data]
 \
 \ Output (UART): eight lines, each an uppercase hex u32 (MSB-first),
-\ followed by a newline.  Shell formats these into .S files.
+\ followed by a newline.  scripts/build.sh (patch_config) converts them
+\ to LE bytes and patches the digest into the tabernacle image.
 \
 \ Hot-path words (sp_box, absorb, swsm, swbg, clearst) use direct
 \ RV32I encoding — no nested `:` calls in the inner kernel.

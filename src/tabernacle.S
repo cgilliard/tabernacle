@@ -2,9 +2,10 @@
 # src/tabernacle.S — sealed bootstrap loader for famchain.
 #
 # Built via:
-#     python3 tools/s2fam0 src/tabernacle.S /tmp/tabernacle.fam0
-#     run bin/tabernacle bin/fam0 /tmp/tabernacle.fam0
-# (scripts/build.sh wraps both steps.)
+#     python3 tools/s2fam0_tabernacle.py src/tabernacle.S src/tabernacle.fam0
+#     run bin/tabernacle.uncompressed bin/fam0 src/tabernacle.fam0
+# (src/tabernacle.fam0 is checked in; scripts/build.sh runs only the second
+#  step — rerun the generator after editing this file.)
 #
 # Boot ABI (we set up our own gp via auto-prologue below):
 #     PC = 0x80000000     entry of this binary
@@ -576,7 +577,7 @@ rx_desc_done:
 	# 16+ entries ahead of used.idx whenever slirp couldn't deliver
 	# responses (e.g., non-loopback IPs while ARP is pending), tripping
 	# QEMU's "Guest moved used index" virtio violation and wedging the
-	# device.  Match tmp/tabernacle.fam's V_QNUM = 1.
+	# device.  Hence V_QNUM = 1.
 	li      t1, 1
 	sw      t1, 0x30(s3)                    # V_QSEL = 1
 	sw      t1, 0x38(s3)                    # V_QNUM = 1
@@ -597,7 +598,7 @@ rx_desc_done:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# §6 Net seed-fetch state machine.  Mirrors tmp/tabernacle.fam §3.
+# §6 Net seed-fetch state machine.
 #
 # Probe → lock → batch with bitmap retry, MTIME watchdog, blacklist+reprobe.
 #
@@ -932,7 +933,7 @@ arp_reply:
 	# Build ARP reply directly into the shared TX buffer at s7+0x820C
 	# (vnet hdr at s7+0x8200, 12 B).  tx_req_range rebuilds the REQ_RANGE
 	# from scratch on each call, so overwriting it here is safe.
-	# Matches tmp/tabernacle.fam (single NTX_BUF at +0x8200).  42-byte frame.
+	# Single NTX_BUF at +0x8200.  42-byte frame.
 	li      t6, 0x820C
 	add     a3, s7, t6                      # frame base
 	# Ethernet: dst = sender of ARP req (a2+18, 6 bytes) via halfwords.
@@ -972,7 +973,6 @@ arp_reply:
 
 rx_refill:
 	# Repost the consumed descriptor.  a0 = desc_idx from used.ring entry.
-	# Matches tmp/tabernacle.fam.
 	addi    t0, s7, 256                     # RX avail base
 	lhu     t1, 2(t0)                       # avail.idx
 	andi    t2, t1, 15
@@ -1028,8 +1028,8 @@ wd_ok:
 
 	# Without a lock yet, do NOT reprobe automatically.  The watchdog
 	# will fire after TIMETIK and either halt N (if still unlocked) or
-	# blacklist + reprobe (if locked).  Matches tmp/tabernacle.fam:
-	# probe-poll just waits until lock or timeout.
+	# blacklist + reprobe (if locked): probe-poll just waits until lock
+	# or timeout.
 	li      t6, 0xFF
 	beq     s6, t6, rx_loop
 
@@ -1048,7 +1048,7 @@ wd_ok:
 	li      t4, NRTRY_TK
 	blt     t3, t4, rx_loop                 # too soon since last retry
 
-	# Batch logic (matches tmp/tabernacle.fam):
+	# Batch logic:
 	#   1. Re-send REQ_RANGE for [BATCH_START..BATCH_START+63] with bitmap
 	#      every NRTRY_TK ms (gated by NS_RTRY) until all 64 land.
 	#   2. When the current batch is fully received, advance BATCH_START by 64.

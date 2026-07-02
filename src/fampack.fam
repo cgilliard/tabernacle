@@ -18,10 +18,9 @@ B7021000 ,   \ lui  t0, 0x100
 ;
 
 \ ──────────────────────────────────────────────────────────────────────────────
-\ tools/fampack.fam — LZ77 self-extracting packer (RV32I, pure fam).
+\ src/fampack.fam — LZ77 self-extracting packer (RV32I, pure fam).
 \
 \ Brute-force match finder: O(N²), 4 KB sliding window, 3..18 byte matches.
-\ Output is byte-identical to Python tools/fampack on the same input.
 \
 \ Wire protocol:
 \ stdin: [4 bytes LE: N] [N bytes data]

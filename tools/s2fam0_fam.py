@@ -10,7 +10,7 @@
 #     13 0B A0 00 # addi s6,zero,10
 # with `#`-comment lines and blank lines ignored by fam0.
 #
-# Usage: s2fam0.py [INPUT.S] [-o OUTPUT.fam0]   (defaults: src/fam.S -> stdout)
+# Usage: s2fam0_fam.py [INPUT.S] [-o OUTPUT.fam0]   (defaults: src/fam.S -> stdout)
 
 import os, re, subprocess, sys
 
