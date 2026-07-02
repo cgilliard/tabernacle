@@ -80,7 +80,7 @@ run bin/full_node.bin \
         bin/fam \
         lib/stdlib.fam \
         lib/build.fam \
-	src/full_node.fam
+	`cat scripts/files.txt`
 cat resources/bible.compressed >> bin/full_node.bin
 patch_config bin/tabernacle.uncompressed bin/full_node.bin
 pack bin/tabernacle.uncompressed bin/tabernacle

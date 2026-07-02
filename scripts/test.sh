@@ -1,3 +1,3 @@
 #!/bin/sh
 
-fam --test src/full_node.fam
+./tools/fam --test `cat scripts/files.txt`
