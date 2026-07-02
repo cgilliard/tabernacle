@@ -553,3 +553,80 @@ Test {
 		8 lit + @ 0 lit asrt_eq   \ subd untouched (nothing submitted)  ( consumes ds )
 	}
 }
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Benches (./tools/fam --bench src/fence.fam src/disk.fam; add --disk=IMG for
+\ the real-device ones — without a disk they self-skip via bfind and report a
+\ near-zero time).  10 MHz timebase: ns/op = ticks*100/ops (bops).
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ bfind ( -- dev|0 )  probe for a virtio-blk device WITHOUT halting (unlike
+\ find_blk): bounds-check each candidate BEFORE reading it, return 0 when the
+\ bus has no DeviceID 2.  Lets device benches self-skip when no --disk given.
+: bfind
+	10009000 lit                 \ one slot above the top; decrement first
+	begin
+		1000 lit -
+		dup 10001000 lit u< if
+			drop 0 lit 1 lit     \ exhausted: leave 0, stop
+		else dup 8 lit + @ 2 lit = if
+			1 lit                \ found: leave dev, stop
+		else
+			0 lit                \ keep scanning
+		then then
+	until
+;
+
+Bench {
+	\ vqsub staging cost, no device involved (staging never touches ds.dev):
+	\ 10000 single-sector writes staged on a fake qnum=16 handle.
+	stage10k {
+		4C lit alloc tqset
+		100 lit alloc over !    \ fake dev (unused by staging; mirrors Test setup)
+		0 lit over 8 lit + !    \ subd 0
+		0 lit over 10 lit + !   \ next 0
+		200 lit alloc           \ ( ds buf )
+		bgo                     \ setup done — start the measured window
+		0 lit begin dup 2710 lit u< while
+			2 lit pick 5 lit 3 lit pick 1 lit vqwrite drop drop
+			1 lit +
+		repeat drop drop drop
+		2710 lit bops
+	}
+	\ REAL device: 1000 sync single-sector writes (kick + vwait each).
+	sync1k {
+		bfind ?dup if
+			48 lit alloc swap over !   \ ( ds ) with ds.dev set
+			D000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+			vblkinit
+			200 lit alloc              \ ( ds buf )
+			bgo                        \ qzero/vblkinit setup isn't measured
+			0 lit begin dup 3E8 lit u< while
+				2 lit pick over 7FF lit and 3 lit pick vwrite vwait drop drop
+				1 lit +
+			repeat drop drop drop
+			3E8 lit bops
+		else bskip then
+	}
+	\ REAL device: 1000 single-sector writes staged in waves of 50 with ONE
+	\ vkick per wave, draining (vpoll until subd == usd) between waves.
+	batch1k {
+		bfind ?dup if
+			48 lit alloc swap over !
+			D000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+			vblkinit
+			200 lit alloc              \ ( ds buf )
+			bgo                        \ qzero/vblkinit setup isn't measured
+			0 lit begin dup 3E8 lit u< while
+				0 lit begin dup 32 lit u< while
+					3 lit pick over 3 lit pick + 7FF lit and 4 lit pick 1 lit vqwrite drop drop
+					1 lit +
+				repeat drop
+				2 lit pick vkick drop
+				begin 2 lit pick vpoll dup C lit + @ over 8 lit + @ = swap drop until
+				32 lit +
+			repeat drop drop drop
+			3E8 lit bops
+		else bskip then
+	}
+}

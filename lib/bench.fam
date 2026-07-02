@@ -1,96 +1,127 @@
 \ ============================================================
-\ lib/test.fam — `--test` test-harness header.
-\ Prepended by `./tools/fam --test` AFTER the stdlib, BEFORE the user source(s).
-\ Runs ONLY the Test { name { code asrt_eq } ... } blocks (the program's
-\ top-level main is skipped — cargo-test model) and prints "<n> tests pass.
-\ Success!". MULTIPLE Test blocks (e.g. one per file) are supported: each block
-\ chains to the next, skipping the main code between them; the appended `_tend`
-\ closes the chain and prints the summary. On the first failing asrt_eq/assert,
-\ prints "Failed: <name>" and exits non-zero (first failure halts).
-\
-\ Control-flow plumbing (compile time): `_skip` plants a forward `jal` before the
-\ user source; each `Test` `jpat!`s the pending jump to its suite start (so main
-\ is jumped over) and each `}` plants the next forward jump; `_tend` `jpat!`s the
-\ last one to itself and emits a `jal` to `_tdone`. `here`/`,j0`/`jpat!` only do
-\ compile-time work inside a `:I`/`:M` body, hence the `_skip` wrapper. Names are
-\ scanned straight from the source by `Test`/`}` (a bare `fib0` never reaches
-\ `???`). stdlib (incl. `???`) is untouched; the default build uses lib/build.fam.
+\ lib/bench.fam — `--bench` bench-harness header.
+\ Prepended by `./tools/fam --bench` AFTER the stdlib, BEFORE the user
+\ source(s).  Runs ONLY the Bench { name { code } ... } blocks — top-level
+\ main is skipped and Test { ... } blocks are consumed (as lib/build.fam
+\ does) — and prints one timing line per named body:
+\   bench <name> ... <ticks> tk[, <n> ns/op]     (or: ... [skipped])
+\ Each body runs ONCE and is timed with the CLINT mtime (10 MHz, 100 ns/tick):
+\ put the iteration loop INSIDE the body and end it with `N lit bops` to get
+\ the ns/op figure (ns/op stays exact for bodies up to ~7 min).  Setup /
+\ teardown: `bgo` restarts the clock (call it after setup), `bstop` freezes
+\ the elapsed time (call it before teardown) — code outside the bgo..bstop
+\ window runs unmeasured.  Both are optional; default = whole body.  asrt_eq /
+\ assert work as in --test (sanity checks; first failure halts).  The
+\ compile-time plumbing (Bench/{/}/_tend/_skip) is byte-for-byte lib/test.fam
+\ machinery — regenerate this file from test.fam if that ever changes.
 \ ============================================================
 
-\ tname ( -- addr ) ptr to current test's name string.  tcount ( -- addr ) counter.
-\ (allocated first -> fixed slots; _tdone reads tcount, name lookup finds _tdone.)
-: tname  variable ;
-: tcount variable ;
-: tstart variable ;   \ mtime (ticks) captured at the first test
+\ bname ( -- addr ) current bench's name.  bcount ( -- addr ) counter.
+: bname  variable ;
+: bcount variable ;
+: bstart variable ;   \ mtime (ticks) at the first bench (drives the summary)
+: b0     variable ;   \ mtime (ticks) when the current body started
+: bopn   variable ;   \ ops in the current body (0 = no ns/op line)
+: bskf   variable ;   \ nonzero = body declared itself skipped (via bskip)
+: btf    variable ;   \ nonzero = bt was frozen by bstop (teardown not timed)
+: bt     variable ;   \ scratch: elapsed ticks of the finished body
 
 \ _now ( -- ticks )  RUNTIME: read the machine timer low word (CLINT mtime @
 \        0x0200BFF8). QEMU virt ticks at 10 MHz (100 ns/tick).
 : _now
-B7C20002 ,   \ lui  t0, 0x0200C
-03A382FF ,   \ lw   t1, -8(t0)         ( mtime low @ 0x0200BFF8 )
-1301C1FF ,   \ addi sp, sp, -4
-23206100 ,   \ sw   t1, 0(sp)
+	B7C20002 ,   \ lui  t0, 0x0200C
+	03A382FF ,   \ lw   t1, -8(t0)         ( mtime low @ 0x0200BFF8 )
+	1301C1FF ,   \ addi sp, sp, -4
+	23206100 ,   \ sw   t1, 0(sp)
 ;
 
-\ _elapsed ( -- )  RUNTIME: print (now - tstart) as "S.CCs" (10 MHz timebase:
-\        10000000=0x989680 ticks/s, 100000=0x186A0 ticks/centisecond).
+\ _elapsed ( -- )  RUNTIME: print (now - bstart) as "S.CCs" (10 MHz timebase).
 : _elapsed
-_now tstart @ -                    \ delta ticks
-dup 989680 lit / u.               \ whole seconds
-2E lit putc                       \ '.'
-989680 lit % 186A0 lit /          \ centiseconds (0..99)
-dup 0A lit u< if 30 lit putc then \ leading zero
-u.
-73 lit putc                       \ 's'
+	_now bstart @ -                    \ delta ticks
+	dup 989680 lit / u.               \ whole seconds
+	2E lit putc                       \ '.'
+	989680 lit % 186A0 lit /          \ centiseconds (0..99)
+	dup 0A lit u< if 30 lit putc then \ leading zero
+	u.
+	73 lit putc                       \ 's'
 ;
 
-\ ANSI colour helpers (escape sequences, byte-by-byte via putc):
-\   _grn = ESC[32m (green)   _red = ESC[31m (red)   _rst = ESC[0m (reset)
-: _grn 1B lit putc 5B lit putc 33 lit putc 32 lit putc 6D lit putc ;
+\ ANSI colour helpers:  _red = ESC[31m   _yel = ESC[33m   _rst = ESC[0m
 : _red 1B lit putc 5B lit putc 33 lit putc 31 lit putc 6D lit putc ;
+: _yel 1B lit putc 5B lit putc 33 lit putc 33 lit putc 6D lit putc ;
 : _rst 1B lit putc 5B lit putc 30 lit putc 6D lit putc ;
 
-\ _okprev ( -- )  RUNTIME: report the just-finished test as passed (green "ok").
-: _okprev
-"test " puts tname @ puts " ... " puts _grn "ok" puts _rst 0A lit putc
+\ _bprev ( -- )  report the just-finished bench: name, then either a yellow
+\ [skipped] (body called bskip) or total ticks and — when the body declared
+\ its op count via bops — an exact ns/op figure computed as
+\ (t/n)*100 + (t%n)*100/n (no 32-bit overflow for any body under ~7 min).
+\ bt is measured now-b0 unless bstop already froze it.
+: _bprev
+	btf @ 0= if _now b0 @ - bt ! then
+	"bench " puts bname @ puts " ... " puts
+	bskf @ if
+		_yel "[skipped]" puts _rst
+	else
+		bt @ u. " tk" puts
+		bopn @ 0 lit > if
+			", " puts
+			bt @ bopn @ / 64 lit *              \ (t/n)*100
+			bt @ bopn @ % 64 lit * bopn @ / +   \ + (t%n)*100/n
+			u. " ns/op" puts
+		then
+	then
+	0A lit putc
 ;
 
-\ _fail  ( -- )  RUNTIME: report the current test FAILED, print the result line,
-\        and exit 1 (first failure halts — no-bugs policy).
+\ bops ( n -- )  declare how many operations the current body performed.
+: bops bopn ! ;
+
+\ bskip ( -- )  declare the current body skipped (e.g. required device absent):
+\ its report line shows a yellow [skipped] instead of a meaningless time.
+: bskip 1 lit bskf ! ;
+
+\ bgo ( -- )  restart the clock: call after setup so it isn't measured.
+: bgo _now b0 ! ;
+
+\ bstop ( -- )  freeze the elapsed time: call before teardown so it isn't
+\ measured.  bgo..bstop bound the measured window; both default to the body.
+: bstop _now b0 @ - bt ! 1 lit btf ! ;
+
+\ _fail  ( -- )  RUNTIME: report the current bench FAILED and exit 1.
 : _fail
-"test " puts tname @ puts " ... " puts _red "FAILED" puts _rst 0A lit putc
-0A lit putc
-"test result: " puts _red "FAILED" puts _rst 0A lit putc
-B7021000 ,   \ lui  t0, 0x100           ( SiFive finisher )
-37330100 ,   \ lui  t1, 0x13
-13033333 ,   \ addi t1, t1, 0x333       ( 0x00013333 = FAIL -> exit 1 )
-23A06200 ,   \ sw   t1, 0(t0)
-6F000000 ,   \ jal  x0, .               ( spin )
+	"bench " puts bname @ puts " ... " puts _red "FAILED" puts _rst 0A lit putc
+	0A lit putc
+	"bench result: " puts _red "FAILED" puts _rst 0A lit putc
+	B7021000 ,   \ lui  t0, 0x100           ( SiFive finisher )
+	37330100 ,   \ lui  t1, 0x13
+	13033333 ,   \ addi t1, t1, 0x333       ( 0x00013333 = FAIL -> exit 1 )
+	23A06200 ,   \ sw   t1, 0(t0)
+	6F000000 ,   \ jal  x0, .               ( spin )
 ;
 
 \ asrt_eq ( actual expected -- )  fail unless equal.
 : asrt_eq <> if _fail then ;
 
-\ assert  ( flag -- )  fail unless flag is non-zero.  0 lit assert -> fail.
+\ assert  ( flag -- )  fail unless flag is non-zero.
 : assert 0= if _fail then ;
 
-\ _tdone ( -- )  RUNTIME: report the last test as ok, then the result line. Reached
-\        by a `jal` from `_tend` (no return-id), so it must NOT return — ends in `bye`.
+\ _tdone ( -- )  RUNTIME: report the last bench, then the summary.  Reached by
+\        a `jal` from `_tend` (no return-id), so it must NOT return.
 : _tdone
-tcount @ if _okprev then
-0A lit putc
-"test result: " puts _grn "ok" puts _rst ". " puts
-tcount @ u.
-" passed; finished in " puts
-_elapsed
-0A lit putc
-bye
+	bcount @ if _bprev then
+	0A lit putc
+	"bench result: " puts
+	bcount @ u.
+	" benches; finished in " puts
+	_elapsed
+	0A lit putc
+	bye
 ;
 
-\ Test ( C: -- )  COMPILE-TIME: `jpat!` the pending forward jump to here (skips the
-\        preceding main / links from the previous block), consume the suite `{`,
-\        and emit a string-push of the FIRST test name.
-:I Test
+\ Bench ( C: -- )  COMPILE-TIME: lib/test.fam's `Test` machinery verbatim —
+\ jpat! the pending forward jump (skips main / links blocks), consume the
+\ suite `{`, emit a string-push of the first bench name.
+:I Bench
 jpat!
 63F02403 ,   \ bgeu s1,s2, bs_eof
 83C20400 ,   \ lbu t0,0(s1)
@@ -185,19 +216,23 @@ B3E26200 ,   \ or t0,t0,t1
 23A05A00 ,   \ sw t0,0(s5)
 ;
 
-\ { ( nameaddr -- )  RUNTIME: report the PREVIOUS test as ok (delayed by one, since
-\        "ok" is only known once the body finished without failing), then record this
-\        test's name and bump the counter.
+\ { ( nameaddr -- )  RUNTIME: report the PREVIOUS bench (its elapsed time is
+\        only known once the next one starts — same delayed-by-one scheme as
+\        test.fam's ok reporting), then record this bench's name and start
+\        tick.  b0 is captured LAST so the reporting I/O isn't timed.
 : {
-tcount @ if _okprev then
-tcount @ 0= if _now tstart ! then   \ first test: capture the start time
-tname !
-tcount @ 1 lit + tcount !
+	bcount @ if _bprev then
+	bcount @ 0= if _now bstart ! then
+	bname !
+	bcount @ 1 lit + bcount !
+	0 lit bopn !
+	0 lit bskf !
+	0 lit btf !
+	_now b0 !
 ;
 
-\ } ( C: -- )  COMPILE-TIME: lookahead. A closing `}` ends the suite: plant a
-\        forward `jal` placeholder (`here ,j0`) for the next block / `_tend` to
-\        backpatch. Any other token is the NEXT test name (string-push).
+\ } ( C: -- )  COMPILE-TIME: lib/test.fam's `}` verbatim — close the suite or
+\ string-push the next bench name.
 :I }
 63F22405 ,   \ bgeu s1,s2, close
 83C20400 ,   \ lbu t0,0(s1)
@@ -283,9 +318,30 @@ B3E26200 ,   \ or t0,t0,t1
 23A05A00 ,   \ sw t0,0(s5)
 ;
 
-\ _tend ( C: -- )  COMPILE-TIME: close the chain — `jpat!` the last forward jump to
-\        here, then look up `_tdone` in the name table and emit `jal x0,_tdone`
-\        (PC-relative). Appended once by ./tools/fam after the user source(s).
+\ Test ( C: -- )  COMPILE-TIME: consume a Test { ... } block (depth-counted,
+\ nests, spans newlines) so tested sources bench cleanly.  lib/build.fam's
+\ consumer verbatim.
+:I Test
+93030000 ,   \ addi t2, x0, 0           ( depth = 0 )
+nxchar       \ tloop: push next char (0x04 at EOF), advance s1
+83220200 ,   \ lw   t0, 0(tp)
+13024200 ,   \ addi tp, tp, 4
+13034000 ,   \ addi t1, x0, 0x04        ( EOT )
+63846202 ,   \ beq  t0, t1, abort       ( EOF -> unterminated )
+1303B007 ,   \ addi t1, x0, 0x7B        ( '{' )
+63966200 ,   \ bne  t0, t1, tclose
+93831300 ,   \ addi t2, t2, 1           ( '{' -> depth++ )
+6FF09FFC ,   \ jal  x0, tloop
+1303D007 ,   \ addi t1, x0, 0x7D        ( tclose: '}' )
+E39062FC ,   \ bne  t0, t1, tloop
+9383F3FF ,   \ addi t2, t2, -1          ( '}' -> depth-- )
+E39C03FA ,   \ bnez t2, tloop
+6F004004 ,   \ jal  x0, done            ( depth 0 -> matched close )
+abort        \ unterminated: print '?' and halt the compiler
+;
+
+\ _tend ( C: -- )  COMPILE-TIME: lib/test.fam's `_tend` verbatim — close the
+\ chain and `jal` to `_tdone`.  Appended once by ./tools/fam --bench.
 :I _tend
 jpat!
 377F646F ,
@@ -325,33 +381,9 @@ B3E26200 ,
 93814100 ,
 ;
 
-\ _skip ( C: -- )  COMPILE-TIME: emit a forward `jal x0,0` placeholder + push its
-\        addr (here ,j0). Wrapped in a :I so here/,j0 run at compile time.
+\ _skip ( C: -- )  COMPILE-TIME: plant the skip-main forward jump.
 :I _skip here ,j0 ;
 
-\ Bench ( C: -- )  COMPILE-TIME: consume a `Bench { ... }` brace group the
-\ same way `Test` is consumed above/in lib/build.fam, so benched sources
-\ still build (and test) as normal programs.  ./tools/fam --bench swaps in
-\ lib/bench.fam, which RUNS the block instead.
-:I Bench
-93030000 ,   \ addi t2, x0, 0           ( depth = 0 )
-nxchar       \ tloop: push next char (0x04 at EOF), advance s1
-83220200 ,   \ lw   t0, 0(tp)
-13024200 ,   \ addi tp, tp, 4
-13034000 ,   \ addi t1, x0, 0x04        ( EOT )
-63846202 ,   \ beq  t0, t1, abort       ( EOF -> unterminated )
-1303B007 ,   \ addi t1, x0, 0x7B        ( '{' )
-63966200 ,   \ bne  t0, t1, tclose
-93831300 ,   \ addi t2, t2, 1           ( '{' -> depth++ )
-6FF09FFC ,   \ jal  x0, tloop
-1303D007 ,   \ addi t1, x0, 0x7D        ( tclose: '}' )
-E39062FC ,   \ bne  t0, t1, tloop
-9383F3FF ,   \ addi t2, t2, -1          ( '}' -> depth-- )
-E39C03FA ,   \ bnez t2, tloop
-6F004004 ,   \ jal  x0, done            ( depth 0 -> matched close )
-abort        \ unterminated: print '?' and halt the compiler
-;
-
 \ Init the counter (runtime, after stdlib `init`), then plant the skip-main jump.
-0 lit tcount !
+0 lit bcount !
 _skip
