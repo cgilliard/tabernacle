@@ -1,3 +1,6 @@
 #!/bin/sh
 
+. ./.ci/_common.sh
+setup_qemu
+
 ./scripts/build.sh
