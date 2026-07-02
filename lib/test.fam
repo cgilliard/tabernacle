@@ -100,7 +100,7 @@ jpat!
 6F000001 ,   \ jal zero, wscan
 93841400 ,   \ addi s1,s1,1
 6FF05FFE ,   \ jal zero, bscan
-6F000011 ,   \ jal zero, done
+6F00C013 ,   \ jal zero, done  (+316: END shifted by the 11-instr empty-block check below)
 63FC2403 ,   \ bgeu s1,s2, emit
 83C20400 ,   \ lbu t0,0(s1)
 1303C005 ,   \ addi t1,zero,0x5C
@@ -115,6 +115,21 @@ jpat!
 1303A000 ,   \ addi t1,zero,0x0A
 E39862FE ,   \ bne t0,t1, wcmt
 6FF0DFFC ,   \ jal zero, wscan
+\ --- empty-block check: if the first token after `{` is `}`, this Test block
+\     has no tests. Consume the `}`, plant the suite-closing forward jump
+\     (here ,j0) that `_tend` will jpat!, and return — so `Test { }` compiles to
+\     "0 passed" instead of swallowing the `}` and underflowing at `_tend`.
+63F62403 ,   \ bgeu s1,s2, emit     ( EOF after `{` -> normal path, +44 )
+83C20400 ,   \ lbu  t0,0(s1)
+1303D007 ,   \ addi t1,zero,0x7D    ( '}' )
+63906202 ,   \ bne  t0,t1, emit     ( not `}` -> normal name scan, +32 )
+93841400 ,   \ addi s1,s1,1         ( consume the `}` )
+1302C2FF ,   \ addi tp,tp,-4        ( here: push gp to the cstack )
+23203200 ,   \ sw   gp,0(tp)
+9302F006 ,   \ addi t0,zero,111     ( ,j0: emit a `jal x0,0` placeholder )
+23A05100 ,   \ sw   t0,0(gp)
+93814100 ,   \ addi gp,gp,4
+6F00800D ,   \ jal  zero, done      ( return: skip the name-push preamble, +216 )
 93027029 ,   \ addi t0,zero,663
 23A05100 ,   \ sw t0,0(gp)
 93814100 ,   \ addi gp,gp,4
