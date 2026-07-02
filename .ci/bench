@@ -1,0 +1,13 @@
+#!/bin/sh
+
+set -e
+
+. ./.ci/_common.sh
+setup_qemu
+
+./scripts/build.sh
+
+IMG=./tmp/disk.img
+dd if=/dev/zero of="$IMG" bs=1M count=64 2>/dev/null
+
+./scripts/bench.sh

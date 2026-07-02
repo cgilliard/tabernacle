@@ -37,6 +37,7 @@ jobs:
         task:
           - build
           - test
+          - bench
     steps:
       - name: Checkout
         uses: actions/checkout@v5
