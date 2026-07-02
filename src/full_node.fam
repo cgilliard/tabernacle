@@ -5,9 +5,3 @@
 'o' lit  putc
 '\n' lit putc
 bye
-
-Test {
-	t0 {
-		0 lit 0 lit asrt_eq
-	}
-}
