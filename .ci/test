@@ -3,4 +3,5 @@
 . ./.ci/_common.sh
 setup_qemu
 
+./scripts/build.sh
 ./scripts/test.sh
