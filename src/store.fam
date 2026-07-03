@@ -357,13 +357,30 @@
 ;
 
 \ ── mt_csum ( buf -- sum )  additive sum of the first 127 words (excludes the
-\ checksum word at +0x1FC) ──
+\ checksum word at +0x1FC).  HOT-ish (once per commit + boot validation): flat
+\ asm, 4 words per iteration; buffer must be word-aligned.  Clobbers
+\ t0-t3/a0-a2. ──
 : mt_csum
-	0 lit
-	7F lit 0 lit do
-		over i 4 lit * + @ +
-	loop
-	nip
+	03250100 ,   \ lw a0,0(sp)
+	93050000 ,   \ li a1,0
+	1306051F ,   \ addi a2,a0,496
+	83220500 ,   \ lw t0,0(a0)
+	03234500 ,   \ lw t1,4(a0)
+	83238500 ,   \ lw t2,8(a0)
+	032EC500 ,   \ lw t3,12(a0)
+	B3855500 ,   \ add a1,a1,t0
+	B3856500 ,   \ add a1,a1,t1
+	B3857500 ,   \ add a1,a1,t2
+	B385C501 ,   \ add a1,a1,t3
+	13050501 ,   \ addi a0,a0,16
+	E36EC5FC ,   \ bltu a0,a2,c
+	83220500 ,   \ lw t0,0(a0)
+	B3855500 ,   \ add a1,a1,t0
+	83224500 ,   \ lw t0,4(a0)
+	B3855500 ,   \ add a1,a1,t0
+	83228500 ,   \ lw t0,8(a0)
+	B3855500 ,   \ add a1,a1,t0
+	2320B100 ,   \ sw a1,0(sp)
 ;
 
 \ ── mt_setck ( buf -- )  store the checksum word ──
@@ -378,12 +395,27 @@
 	then
 ;
 
-\ ── mt_cp ( src dst -- )  copy a whole 512-B sector ──
+\ ── mt_cp ( src dst -- )  copy a whole 512-B sector.  HOT PATH: one call per
+\ trie level per COW insert — the fam word-loop cost 27.7 us/copy, 10x the
+\ page's batched write; this flat asm (4 words/iteration) is ~1 us.  Both
+\ buffers must be word-aligned (alloc'd buffers + pool frames are).
+\ Clobbers t0-t3/a0-a2. ──
 : mt_cp
-	80 lit 0 lit do
-		over i 4 lit * + @ over i 4 lit * + !
-	loop
-	2drop
+	03254100 ,   \ lw a0,4(sp)
+	83250100 ,   \ lw a1,0(sp)
+	13018100 ,   \ addi sp,sp,8
+	13060520 ,   \ addi a2,a0,512
+	83220500 ,   \ lw t0,0(a0)
+	03234500 ,   \ lw t1,4(a0)
+	83238500 ,   \ lw t2,8(a0)
+	032EC500 ,   \ lw t3,12(a0)
+	23A05500 ,   \ sw t0,0(a1)
+	23A26500 ,   \ sw t1,4(a1)
+	23A47500 ,   \ sw t2,8(a1)
+	23A6C501 ,   \ sw t3,12(a1)
+	13050501 ,   \ addi a0,a0,16
+	93850501 ,   \ addi a1,a1,16
+	E36CC5FC ,   \ bltu a0,a2,10
 ;
 
 \ ── mt_gen ( buf -- )  fill a buffer with the genesis meta (next_page=2:
@@ -655,5 +687,93 @@ Test {
 			dup @ 3 lit bp_get @ 5EED5EED lit asrt_eq drop
 			drop drop
 		then
+	}
+}
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Benches (scripts/bench.sh runs them with --disk; without one the device
+\ benches self-skip via bfind).  sprobe/scopy/scsum are the engine's CPU
+\ primitives — scopy and scsum are the flagged asm candidates, benched so the
+\ decision stays measured.  scommit is THE number for the DB: a full COW
+\ transaction (32 fresh pages, batched flush, two durability barriers, meta
+\ flip) per op.  sread1k is the cold page-in path (bp_get miss = one real
+\ read per op).
+\ ──────────────────────────────────────────────────────────────────────────────
+
+Bench {
+	\ hash-index probe HIT: the hot path of every cached node access.
+	sprobe {
+		0 lit 20 lit bp_init                \ 32-frame pool, fake ds
+		dup 7 lit frm                       \ make page 0x55 resident in frame 7
+		55 lit over 200 lit + !
+		2dup h_ins drop                     \ ( bp )
+		bgo
+		0 lit begin dup 2710 lit u< while
+			over 55 lit bp_probe drop drop
+			1 lit +
+		repeat drop drop
+		2710 lit bops
+	}
+	\ mt_cp: the 512-B COW node copy (one per trie level per insert).
+	scopy {
+		200 lit alloc 200 lit alloc         \ ( src dst )
+		bgo
+		0 lit begin dup 2710 lit u< while
+			2 lit pick 2 lit pick mt_cp
+			1 lit +
+		repeat drop drop drop
+		2710 lit bops
+	}
+	\ mt_csum: the commit-path meta checksum (127 words summed).
+	scsum {
+		200 lit alloc dup mt_gen            \ ( buf )
+		bgo
+		0 lit begin dup 2710 lit u< while
+			over mt_csum drop
+			1 lit +
+		repeat drop drop
+		2710 lit bops
+	}
+	\ REAL device: full COW commit — 32 fresh dirty pages per txn, then
+	\ commit = batched bp_flush (one kick) + data flush + meta write + flush
+	\ + flip.  32 txns; ns/op = one whole commit (flush-barrier dominated).
+	scommit {
+		bfind ?dup if
+			48 lit alloc swap over !
+			D000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+			vblkinit
+			28 lit eng_init                 \ 40-frame pool ( eng )
+			dup mt_boot
+			bgo
+			0 lit begin dup 20 lit u< while
+				over tx_begin
+				0 lit begin dup 20 lit u< while
+					2 lit pick pg_new       \ ( eng i j eng page )
+					swap @ swap bp_alloc    \ ( eng i j bp framep )
+					bp_unpin drop           \ ( eng i j )
+					1 lit +
+				repeat drop
+				over commit
+				1 lit +
+			repeat drop drop
+			20 lit bops                     \ per COMMIT (32 pages each)
+		else bskip then
+	}
+	\ REAL device: 1000 COLD page-ins — every bp_get misses the 40-frame pool
+	\ (distinct pages 0x400..), so each op is a real blocking read.
+	sread1k {
+		bfind ?dup if
+			48 lit alloc swap over !
+			D000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+			vblkinit
+			28 lit bp_init                  \ ( bp )
+			bgo
+			0 lit begin dup 3E8 lit u< while
+				over over 400 lit + bp_get  \ page = 0x400 + i: always a miss
+				bp_unpin drop               \ ( bp i )
+				1 lit +
+			repeat drop drop
+			3E8 lit bops
+		else bskip then
 	}
 }
