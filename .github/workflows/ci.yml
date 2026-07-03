@@ -25,6 +25,11 @@ jobs:
     # Backstop: a wedged job (e.g. apt lock) dies in minutes with logs, instead of
     # running to the default 360-min limit and tying up a runner.
     timeout-minutes: 20
+    # Windows defaults to pwsh; the .ci scripts are POSIX sh, so run every
+    # step under bash (Git Bash on Windows; no-op elsewhere).
+    defaults:
+      run:
+        shell: bash
 
     strategy:
       fail-fast: false
@@ -36,6 +41,8 @@ jobs:
             runner: ubuntu-24.04-arm
           - platform: macos-arm64
             runner: macos-latest
+          - platform: windows-amd64
+            runner: windows-latest
         task:
           - build
           - test
@@ -49,7 +56,7 @@ jobs:
       - name: Show host info
         run: |
           uname -a
-          python3 --version
+          python3 --version || python --version || true
 
       - name: ${{ matrix.task }}
         run: ./.ci/${{ matrix.task }}

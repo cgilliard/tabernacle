@@ -1,0 +1,6 @@
+# No line-ending conversion, ever.  This repo is byte-exact: fam0.seed is
+# cmp'd against a rebuilt binary, .fam/.fam0 sources feed a compiler that
+# hashes its output, and /bin/sh scripts break under CRLF.  Windows checkouts
+# (git autocrlf=true on the GitHub runner image) would silently corrupt all of
+# it without this.
+* -text

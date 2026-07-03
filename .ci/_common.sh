@@ -4,6 +4,30 @@ setup_qemu() {
 		return 0
 	fi
 
+	case "$(uname -s)" in
+	MINGW*|MSYS*)
+		# Windows runner, under Git Bash (ci.yml sets `shell: bash`).
+		# Chocolatey's qemu package includes qemu-system-riscv32.exe; choco
+		# adds it to the MACHINE PATH, which this already-running shell
+		# doesn't see, so export the install dir explicitly.
+		if ! command -v qemu-system-riscv32 >/dev/null 2>&1; then
+			n=0
+			until [ "$n" -ge 3 ]; do
+				if choco install qemu --no-progress -y; then
+					break
+				fi
+				n=$((n + 1))
+				echo "setup_qemu: choco attempt $n/3 failed, retrying in 15s..." >&2
+				sleep 15
+			done
+			[ "$n" -lt 3 ] || { echo "setup_qemu: choco failed after 3 attempts" >&2; return 1; }
+			export PATH="/c/Program Files/qemu:$PATH"
+		fi
+		qemu-system-riscv32 --version | head -1
+		return 0
+		;;
+	esac
+
 	if [ "$(uname -s)" = "Darwin" ]; then
 		# macOS runner: Homebrew.  The bottled qemu includes
 		# qemu-system-riscv32.  NO_AUTO_UPDATE skips the slow (and
