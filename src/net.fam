@@ -643,3 +643,92 @@ Test {
 		then
 	}
 }
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Benches:
+\   ./tools/fam --bench --net --hostfwd=udp::47653-:47653 src/fence.fam src/net.fam
+\ (without --net the device benches self-skip via nfind).  The frames are
+\ outbound-only, but BIND THE PORT anyway: with no listener on the host, every
+\ frame pays slirp's ICMP-port-unreachable error path (~200 us/packet,
+\ measured — it dwarfs kicks and makes batching look useless); with slirp
+\ owning the port via --hostfwd, the benches measure the transport itself.
+\ ──────────────────────────────────────────────────────────────────────────────
+
+Bench {
+	\ txq staging cost, no device involved (staging never touches ns.dev):
+	\ 10000 zero-copy frames staged on a fake handle.
+	nstage {
+		40 lit alloc                                               \ ( ns )
+		3000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !   \ tx_q
+		tx_setup
+		200 lit alloc              \ payload ( ns pay )
+		bgo
+		0 lit begin dup 2710 lit u< while
+			2 lit pick 2 lit pick 10 lit 34 lit txq drop drop
+			1 lit +
+		repeat drop drop drop
+		2710 lit bops
+	}
+	\ frame-header build cost (mkhdr: ip_csum + ~50 byte stores) — the
+	\ per-packet CPU work a node pays before each txq.
+	nhdr {
+		40 lit alloc               \ ( hbuf )
+		bgo
+		0 lit begin dup 2710 lit u< while
+			over over mkhdr
+			1 lit +
+		repeat drop drop
+		2710 lit bops
+	}
+	\ REAL device: 1000 frames posted one at a time — kick + drain each
+	\ (serial slirp round trips; headers pre-built into every slot).
+	nsync {
+		nfind ?dup if
+			40 lit alloc swap over !                                   \ ( ns )
+			3000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ rx_q
+			3000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !   \ tx_q
+			6000 lit alloc over C lit + !                              \ rx_bufs
+			net_init rx_setup tx_setup
+			0 lit begin dup 40 lit u< while
+				over 10 lit + @ over 6 lit lshift + 0 lit mkhdr   \ header in slot s
+				1 lit +
+			repeat drop
+			200 lit alloc          \ payload ( ns pay )
+			bgo
+			0 lit begin dup 3E8 lit u< while
+				2 lit pick 2 lit pick 10 lit 34 lit txq drop drop
+				2 lit pick tx_kick drop
+				begin 2 lit pick tx_poll tx_busy swap drop 0= until
+				1 lit +
+			repeat drop drop drop
+			3E8 lit bops
+		else bskip then
+	}
+	\ REAL device: 1024 frames in full-pipeline waves of 64 with ONE tx_kick
+	\ per wave, draining between waves.
+	nbatch {
+		nfind ?dup if
+			40 lit alloc swap over !
+			3000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !
+			3000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !
+			6000 lit alloc over C lit + !
+			net_init rx_setup tx_setup
+			0 lit begin dup 40 lit u< while
+				over 10 lit + @ over 6 lit lshift + 0 lit mkhdr
+				1 lit +
+			repeat drop
+			200 lit alloc          \ payload ( ns pay )
+			bgo
+			0 lit begin dup 400 lit u< while
+				0 lit begin dup 40 lit u< while
+					3 lit pick 3 lit pick 10 lit 34 lit txq drop drop
+					1 lit +
+				repeat drop
+				2 lit pick tx_kick drop
+				begin 2 lit pick tx_poll tx_busy swap drop 0= until
+				40 lit +
+			repeat drop drop drop
+			400 lit bops
+		else bskip then
+	}
+}
