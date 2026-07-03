@@ -41,22 +41,32 @@
 \   ns+0x3C tx_usd    TX completions reaped (used-ring cursor)
 
 \ ===== checksums =====
+\ ip_csum ( addr -- csum )  Internet checksum of a 20-byte IP header.
+\ HOT PATH: flat asm (byte loads, so no alignment requirement); used by every
+\ header build.  Clobbers t0-t1/a0/a2-a3.
 : ip_csum
-	0 lit swap
-	dup c@ 8 lit lshift over 1 lit + c@ or rot + swap
-	dup 2 lit + c@ 8 lit lshift over 3 lit + c@ or rot + swap
-	dup 4 lit + c@ 8 lit lshift over 5 lit + c@ or rot + swap
-	dup 6 lit + c@ 8 lit lshift over 7 lit + c@ or rot + swap
-	dup 8 lit + c@ 8 lit lshift over 9 lit + c@ or rot + swap
-	dup A lit + c@ 8 lit lshift over B lit + c@ or rot + swap
-	dup C lit + c@ 8 lit lshift over D lit + c@ or rot + swap
-	dup E lit + c@ 8 lit lshift over F lit + c@ or rot + swap
-	dup 10 lit + c@ 8 lit lshift over 11 lit + c@ or rot + swap
-	dup 12 lit + c@ 8 lit lshift over 13 lit + c@ or rot + swap
-	drop
-	dup 10 lit rshift swap FFFF lit and +
-	dup 10 lit rshift swap FFFF lit and +
-	invert FFFF lit and
+	03260100 ,   \ lw a2,0(sp)
+	13050000 ,   \ li a0,0
+	93064601 ,   \ addi a3,a2,20
+	83420600 ,   \ lbu t0,0(a2)
+	03431600 ,   \ lbu t1,1(a2)
+	93928200 ,   \ slli t0,t0,0x8
+	B3E26200 ,   \ or t0,t0,t1
+	33055500 ,   \ add a0,a0,t0
+	13062600 ,   \ addi a2,a2,2
+	E364D6FE ,   \ bltu a2,a3,c
+	93520501 ,   \ srli t0,a0,0x10
+	13150501 ,   \ slli a0,a0,0x10
+	13550501 ,   \ srli a0,a0,0x10
+	33055500 ,   \ add a0,a0,t0
+	93520501 ,   \ srli t0,a0,0x10
+	13150501 ,   \ slli a0,a0,0x10
+	13550501 ,   \ srli a0,a0,0x10
+	33055500 ,   \ add a0,a0,t0
+	1345F5FF ,   \ not a0,a0
+	13150501 ,   \ slli a0,a0,0x10
+	13550501 ,   \ srli a0,a0,0x10
+	2320A100 ,   \ sw a0,0(sp)
 ;
 
 \ ===== device discovery + memory helpers =====
@@ -223,25 +233,44 @@
 \ header-only single-descriptor frame (e.g. ARP).  Batch: N x txq then ONE
 \ tx_kick.  Caller must ensure a free slot (txfree?) — at most 64 in flight.
 : txq
-	3 lit pick 24 lit + @                             \ id = tx_next  ( ns p l h id )
-	dup 1 lit + 3F lit and 5 lit pick 24 lit + !      \ tx_next = (id+1) & 63
-	dup 2 lit lshift 5 lit pick 30 lit + @ + 0 lit swap !   \ tx_done[id] = 0
-	dup 5 lit lshift 5 lit pick 8 lit + @ +           \ d0 = tx_q + id*0x20  ( .. id d0 )
-	2 lit pick over 8 lit + !                         \ d0.len = hlen
-	3 lit pick 0 lit > if 1 lit else 0 lit then over C lit + h!   \ d0.flags = plen? NEXT : 0
-	3 lit pick 0 lit > if
-		4 lit pick over 10 lit + !                    \ d1.addr = payload
-		0 lit over 14 lit + !
-		3 lit pick over 18 lit + !                    \ d1.len = plen
-		0 lit over 1C lit + h!                        \ d1.flags = 0
-		0 lit over 1E lit + h!                        \ d1.next = 0
-	then
-	drop                                              \ ( ns p l h id )
-	4 lit pick 1C lit + @ 7F lit and 1 lit lshift     \ ring off = (aidx & 0x7F)*2
-	5 lit pick 8 lit + @ + 804 lit +                  \ &avail.ring[j] (avail@0x800)
-	over 1 lit lshift swap h!                         \ ring[j] = head = 2*id
-	4 lit pick 1C lit + dup @ 1 lit + swap !          \ tx_aidx += 1
-	swap drop swap drop swap drop                     \ ( ns id )
+	0325C100 ,   \ lw a0,12(sp)
+	032E0100 ,   \ lw t3,0(sp)
+	832E4100 ,   \ lw t4,4(sp)
+	032F8100 ,   \ lw t5,8(sp)
+	83254502 ,   \ lw a1,36(a0)
+	93821500 ,   \ addi t0,a1,1
+	93F2F203 ,   \ andi t0,t0,63
+	23225502 ,   \ sw t0,36(a0)
+	83220503 ,   \ lw t0,48(a0)
+	13932500 ,   \ slli t1,a1,0x2
+	B3826200 ,   \ add t0,t0,t1
+	23A00200 ,   \ sw zero,0(t0)
+	83238500 ,   \ lw t2,8(a0)
+	93925500 ,   \ slli t0,a1,0x5
+	33865300 ,   \ add a2,t2,t0
+	2324C601 ,   \ sw t3,8(a2)
+	93020000 ,   \ li t0,0
+	63840E00 ,   \ beqz t4,4c
+	93021000 ,   \ li t0,1
+	23165600 ,   \ sh t0,12(a2)
+	638C0E00 ,   \ beqz t4,68
+	2328E601 ,   \ sw t5,16(a2)
+	232A0600 ,   \ sw zero,20(a2)
+	232CD601 ,   \ sw t4,24(a2)
+	231E0600 ,   \ sh zero,28(a2)
+	231F0600 ,   \ sh zero,30(a2)
+	8322C501 ,   \ lw t0,28(a0)
+	13F3F207 ,   \ andi t1,t0,127
+	13131300 ,   \ slli t1,t1,0x1
+	93830340 ,   \ addi t2,t2,1024
+	93830340 ,   \ addi t2,t2,1024
+	33037300 ,   \ add t1,t1,t2
+	939F1500 ,   \ slli t6,a1,0x1
+	2312F301 ,   \ sh t6,4(t1)
+	93821200 ,   \ addi t0,t0,1
+	232E5500 ,   \ sw t0,28(a0)
+	13018100 ,   \ addi sp,sp,8
+	2320B100 ,   \ sw a1,0(sp)
 ;
 
 \ tx_kick ( ns -- ns )  publish every staged frame (avail.idx = tx_aidx) and
@@ -254,18 +283,29 @@
 
 \ tx_poll ( ns -- ns )  reap every drained TX frame into tx_done[]; never waits.
 : tx_poll
-	begin
-		dup 8 lit + @ 1002 lit + h@    \ TX used.idx
-		over 3C lit + @ FFFF lit and   \ tx_usd (16-bit)
-		<>
-	while
-		fence_r                                          \ order ring reads after idx
-		dup 3C lit + @ 7F lit and 3 lit lshift           \ (usd & 0x7F)*8
-		over 8 lit + @ + 1004 lit + @                    \ used.ring[j].id = 2*slot
-		1 lit rshift                                     \ slot
-		2 lit lshift over 30 lit + @ + 1 lit swap !      \ tx_done[slot] = 1
-		dup 3C lit + dup @ 1 lit + swap !                \ tx_usd += 1
-	repeat
+	03250100 ,   \ lw a0,0(sp)
+	83228500 ,   \ lw t0,8(a0)
+	37130000 ,   \ lui t1,0x1
+	B3856200 ,   \ add a1,t0,t1
+	03D32500 ,   \ lhu t1,2(a1)
+	8323C503 ,   \ lw t2,60(a0)
+	139E0301 ,   \ slli t3,t2,0x10
+	135E0E01 ,   \ srli t3,t3,0x10
+	630EC303 ,   \ beq t1,t3,5c
+	0F002002 ,   \ fence r,r
+	13FEF307 ,   \ andi t3,t2,127
+	131E3E00 ,   \ slli t3,t3,0x3
+	330EBE00 ,   \ add t3,t3,a1
+	832E4E00 ,   \ lw t4,4(t3)
+	93DE1E00 ,   \ srli t4,t4,0x1
+	939E2E00 ,   \ slli t4,t4,0x2
+	032F0503 ,   \ lw t5,48(a0)
+	330FDF01 ,   \ add t5,t5,t4
+	930F1000 ,   \ li t6,1
+	2320FF01 ,   \ sw t6,0(t5)
+	93831300 ,   \ addi t2,t2,1
+	232E7502 ,   \ sw t2,60(a0)
+	6FF09FFB ,   \ j 10
 ;
 
 \ txstat ( ns id -- ns done? )  pure read of tx_done[id].
