@@ -45,6 +45,7 @@ while [ $# -gt 0 ]; do
 		--bench) BENCH=1; shift ;;
 		--disk=*) QOPTS="$QOPTS $1"; shift ;;
 		--net) QOPTS="$QOPTS $1"; shift ;;
+		--hostfwd=*) QOPTS="$QOPTS $1"; shift ;;
 		-h|--help) echo "Usage: fam [--test|--bench] [--disk=FILE] [-o OUTPUT] INPUT.fam"; exit 0 ;;
 		--) shift; IN="$1"; shift ;;
 		-*) echo "fam: unknown option: $1" >&2; exit 1 ;;

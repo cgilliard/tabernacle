@@ -1,5 +1,44 @@
 \ ──────────────────────────────────────────────────────────────────────────────
 \ src/net.fam — virtio-net primitives for the full node (NON-BLOCKING I/O).
+\
+\ Non-blocking; the caller owns the poll loop:
+\   rx_poll ( ns -- ns frame|0 )       packet waiting?  frame ptr + id recorded.
+\   rx_qdone( ns -- ns )               re-post consumed RX buffer, NO doorbell.
+\   rx_kick ( ns -- ns )               one doorbell for every re-post since last.
+\   rx_done ( ns -- ns )               rx_qdone + rx_kick (single-packet form).
+\   txnext  ( ns -- ns hbuf )          header buffer of the NEXT slot txq claims
+\                                      (build the frame header there, zero-copy).
+\   txq     ( ns payload plen hlen -- ns id )  stage a frame, NO doorbell:
+\                                      desc0 = slot header (hlen B), desc1 =
+\                                      payload by reference (omitted if plen=0).
+\   tx_kick ( ns -- ns )               publish avail.idx + ONE doorbell for all
+\                                      staged frames (64-frame burst = 1 VM exit).
+\   tx_poll ( ns -- ns )               reap TX completions into tx_done[]; never
+\                                      waits.
+\   txstat  ( ns id -- ns done? )      pure read of tx_done[id].
+\   txfree? ( ns -- ns f )             can txq safely claim its next slot?
+\   tx_busy ( ns -- ns f )             any staged frame not yet drained?
+\
+\ TX is 64 slots (QueueNum 128, 2 descriptors per slot), sized to the REQ_RANGE
+\ protocol burst (64 chunks per batch): a full reply burst stages in one kick.
+\ Slot s: descriptors 2s,2s+1 at tx_q + s*0x20; 64-B header buffer at
+\ tx_hdrs + s*0x40 (desc0.addr/next are pre-filled once by tx_setup).
+\ RX is QueueNum 16 with 16 x 0x600 buffers (rx_setup).
+\
+\ State block `ns` (caller-allocated, >= 0x40 bytes):
+\   ns+0x00 dev       virtio-net MMIO base
+\   ns+0x04 rx_q      RX queue base (page-aligned, >= 0x2000 B, zeroed)
+\   ns+0x08 tx_q      TX queue base (page-aligned, >= 0x2000 B, zeroed)
+\   ns+0x0C rx_bufs   16 x 0x600 RX frame buffers
+\   ns+0x10 tx_hdrs   64 x 0x40 per-slot TX header buffers (tx_setup)
+\   ns+0x1C tx_aidx   frames staged (drives avail.idx at tx_kick)
+\   ns+0x20 rx_last   RX used-ring cursor
+\   ns+0x24 tx_next   next TX slot the rotating allocator hands out
+\   ns+0x28 scratch   (rx_setup / rx_qdone)
+\   ns+0x30 tx_donep  ptr to tx_done[64] (0 pending, 1 drained)
+\   ns+0x34 rx frame  ptr recorded by rx_poll
+\   ns+0x38 rx desc   id recorded by rx_poll
+\   ns+0x3C tx_usd    TX completions reaped (used-ring cursor)
 
 \ ===== checksums =====
 : ip_csum
@@ -64,7 +103,7 @@
 	dup 3C lit + 1000 lit swap !
 	over 4 lit + @ C lit rshift over 40 lit + !
 	dup 30 lit + 1 lit swap !
-	dup 38 lit + 2 lit swap !
+	dup 38 lit + 80 lit swap !   \ TX QueueNum = 128 (64 x 2-desc zero-copy slots)
 	dup 3C lit + 1000 lit swap !
 	over 8 lit + @ C lit rshift over 40 lit + !
 	dup dup 70 lit + @ 4 lit or swap 70 lit + !
@@ -149,57 +188,235 @@
 \ rx_done ( ns -- ns )  re-post + kick, one call (rx_qdone + rx_kick).
 : rx_done rx_qdone rx_kick ;
 
-\ tx_post ( ns -- ns )  hand the frame in tx_buf (length ns+0x24) to the TX queue and
-\ ring the doorbell.  Returns immediately — does NOT wait for the transmit to drain.
-: tx_post
-	dup 1C lit + dup @ 1 lit + swap !
-	dup 8 lit + @
-	over 10 lit + @ over !
-	dup 4 lit + 0 lit swap !
-	over 24 lit + @ over 8 lit + !
-	dup C lit + 0 lit swap h!
-	dup E lit + 0 lit swap h!
-	dup 20 lit + 0 lit swap h!
-	dup 24 lit + 0 lit swap h!
-	dup 26 lit + 0 lit swap h!
-	over 1C lit + @ over 22 lit + h!
-	drop
-	fence_io
-	dup @ 50 lit + 1 lit swap !
+\ tx_setup ( ns -- ns )  init the 64-slot TX side: alloc tx_done[64] + the
+\ per-slot header region, zero the cursors, and pre-fill each slot's CONSTANT
+\ descriptor fields (desc0.addr = its header buffer, desc0.next = 2s+1) so txq
+\ only writes what varies.  Call after net_init.
+: tx_setup
+	100 lit alloc over 30 lit + !    \ tx_donep = done[64] (fresh heap, zeroed)
+	1000 lit alloc over 10 lit + !   \ tx_hdrs  = 64 x 0x40
+	0 lit over 1C lit + !            \ tx_aidx = 0
+	0 lit over 24 lit + !            \ tx_next = 0
+	0 lit over 3C lit + !            \ tx_usd  = 0
+	0 lit                            \ ( ns s )
+	begin dup 40 lit u< while
+		over 8 lit + @ over 5 lit lshift +                \ d0 = tx_q + s*0x20
+		2 lit pick 10 lit + @ 2 lit pick 6 lit lshift +   \ hbuf = tx_hdrs + s*0x40
+		over !                                            \ d0.addr = hbuf
+		0 lit over 4 lit + !                              \ d0.addr hi = 0
+		dup E lit + 2 lit pick 1 lit lshift 1 lit + swap h!   \ d0.next = 2s+1
+		drop
+		1 lit +
+	repeat drop
 ;
 
-\ tx_post2 ( ns -- ns )  zero-copy two-descriptor post: desc[0] is the 0x3B-byte header
-\ in tx_buf, desc[1] is the payload BY REFERENCE (addr ns+0x3C, len ns+0x30) — no copy.
-\ Rings the doorbell and returns immediately; does NOT wait for the transmit.
-: tx_post2
-	dup 1C lit + dup @ 1 lit + swap !
-	dup 8 lit + @
-	over 10 lit + @ over !
-	dup 4 lit + 0 lit swap !
-	3B lit over 8 lit + !
-	dup C lit + 1 lit swap h!
-	dup E lit + 1 lit swap h!
-	over 3C lit + @ over 10 lit + !
-	dup 14 lit + 0 lit swap !
-	over 30 lit + @ over 18 lit + !
-	dup 1C lit + 0 lit swap h!
-	dup 1E lit + 0 lit swap h!
-	dup 20 lit + 0 lit swap h!
-	dup 24 lit + 0 lit swap h!
-	dup 26 lit + 0 lit swap h!
-	over 1C lit + @ over 22 lit + h!
-	drop
-	fence_io
-	dup @ 50 lit + 1 lit swap !
+\ txnext ( ns -- ns hbuf )  header buffer of the slot the NEXT txq will claim.
+\ Build the frame header (vnet+eth+ip+udp, <= 0x40 B) here, then txq — the
+\ header is sent from this buffer by reference, zero-copy.
+: txnext
+	dup 24 lit + @ 6 lit lshift over 10 lit + @ +
 ;
 
-\ tx_busy ( ns -- ns flag )  pure status read: is the last posted frame still in
-\ flight?  (tx_aidx != TX used.idx)  This is what used to be a blocking spin.
+\ txq ( ns payload plen hlen -- ns id )  STAGE a frame in the next slot — NO
+\ doorbell.  desc0 = the slot's header buffer (hlen bytes, built via txnext);
+\ desc1 = payload BY REFERENCE (plen bytes, no copy).  plen = 0 stages a
+\ header-only single-descriptor frame (e.g. ARP).  Batch: N x txq then ONE
+\ tx_kick.  Caller must ensure a free slot (txfree?) — at most 64 in flight.
+: txq
+	3 lit pick 24 lit + @                             \ id = tx_next  ( ns p l h id )
+	dup 1 lit + 3F lit and 5 lit pick 24 lit + !      \ tx_next = (id+1) & 63
+	dup 2 lit lshift 5 lit pick 30 lit + @ + 0 lit swap !   \ tx_done[id] = 0
+	dup 5 lit lshift 5 lit pick 8 lit + @ +           \ d0 = tx_q + id*0x20  ( .. id d0 )
+	2 lit pick over 8 lit + !                         \ d0.len = hlen
+	3 lit pick 0 lit > if 1 lit else 0 lit then over C lit + h!   \ d0.flags = plen? NEXT : 0
+	3 lit pick 0 lit > if
+		4 lit pick over 10 lit + !                    \ d1.addr = payload
+		0 lit over 14 lit + !
+		3 lit pick over 18 lit + !                    \ d1.len = plen
+		0 lit over 1C lit + h!                        \ d1.flags = 0
+		0 lit over 1E lit + h!                        \ d1.next = 0
+	then
+	drop                                              \ ( ns p l h id )
+	4 lit pick 1C lit + @ 7F lit and 1 lit lshift     \ ring off = (aidx & 0x7F)*2
+	5 lit pick 8 lit + @ + 804 lit +                  \ &avail.ring[j] (avail@0x800)
+	over 1 lit lshift swap h!                         \ ring[j] = head = 2*id
+	4 lit pick 1C lit + dup @ 1 lit + swap !          \ tx_aidx += 1
+	swap drop swap drop swap drop                     \ ( ns id )
+;
+
+\ tx_kick ( ns -- ns )  publish every staged frame (avail.idx = tx_aidx) and
+\ ring the TX doorbell once.
+: tx_kick
+	dup 1C lit + @ over 8 lit + @ 802 lit + h!   \ avail.idx = tx_aidx (low 16)
+	fence_io
+	dup @ 50 lit + 1 lit swap !                  \ QueueNotify queue 1
+;
+
+\ tx_poll ( ns -- ns )  reap every drained TX frame into tx_done[]; never waits.
+: tx_poll
+	begin
+		dup 8 lit + @ 1002 lit + h@    \ TX used.idx
+		over 3C lit + @ FFFF lit and   \ tx_usd (16-bit)
+		<>
+	while
+		fence_r                                          \ order ring reads after idx
+		dup 3C lit + @ 7F lit and 3 lit lshift           \ (usd & 0x7F)*8
+		over 8 lit + @ + 1004 lit + @                    \ used.ring[j].id = 2*slot
+		1 lit rshift                                     \ slot
+		2 lit lshift over 30 lit + @ + 1 lit swap !      \ tx_done[slot] = 1
+		dup 3C lit + dup @ 1 lit + swap !                \ tx_usd += 1
+	repeat
+;
+
+\ txstat ( ns id -- ns done? )  pure read of tx_done[id].
+: txstat
+	2 lit lshift over 30 lit + @ + @
+;
+
+\ txfree? ( ns -- ns f )  nonzero if txq's NEXT slot is safe to claim: either
+\ never used (fewer than 64 frames ever staged) or already reaped by tx_poll.
+: txfree?
+	dup 24 lit + @ 2 lit lshift over 30 lit + @ + @   \ tx_done[tx_next]
+	over 1C lit + @ 40 lit u< or                      \ or aidx < 64 (virgin slot)
+;
+
+\ tx_busy ( ns -- ns flag )  pure status read: any staged frame not yet drained?
+\ (tx_aidx != TX used.idx)  This is what used to be a blocking spin.
 : tx_busy
 	dup 1C lit + @ FFFF lit and
 	over 8 lit + @ 1002 lit + h@
 	<>
 ;
+
+\ ══════════════════════════════════════════════════════════════════════════════
+\ Test support (cf. disk.fam's tqset/bfind): a non-halting device probe and the
+\ frame builder for the real-network burst test below.
+\ ══════════════════════════════════════════════════════════════════════════════
+
+\ nfind ( -- dev|0 )  probe for a virtio-net device WITHOUT halting (unlike
+\ find_net): bounds-check each candidate BEFORE reading it, 0 when absent.
+\ Lets the real-network test self-skip when q32 runs without --net.
+: nfind
+	10009000 lit                 \ one slot above the top; decrement first
+	begin
+		1000 lit -
+		dup 10001000 lit u< if
+			drop 0 lit 1 lit     \ exhausted: leave 0, stop
+		else dup 8 lit + @ 1 lit = if
+			1 lit                \ found: leave dev, stop
+		else
+			0 lit                \ keep scanning
+		then then
+	until
+;
+
+\ mkhdr ( hbuf seq -- )  build the burst test's 0x34-byte frame header: 10 B
+\ vnet (features=0 legacy — VERIFIED by pcap; 12 B leaks two stray bytes into
+\ the ethernet frame) + eth to the slirp gateway MAC (no ARP needed) + IP
+\ 10.0.2.15 -> 10.0.2.2 + UDP 3333 -> 47653 (0xBA25 — keep in sync with the
+\ --hostfwd port in scripts/test.sh), 16-B payload carried by reference.
+: mkhdr
+	\ vnet hdr: 10 zero bytes (legacy virtio-net, no features negotiated)
+	over 0 lit swap !  over 4 lit + 0 lit swap !
+	over 8 lit + 0 lit swap h!
+	\ eth dst = slirp gateway 52:55:0a:00:02:02
+	52 lit 2 lit pick A lit + c!
+	55 lit 2 lit pick B lit + c!
+	0A lit 2 lit pick C lit + c!
+	00 lit 2 lit pick D lit + c!
+	02 lit 2 lit pick E lit + c!
+	02 lit 2 lit pick F lit + c!
+	\ eth src = QEMU default 52:54:00:12:34:56
+	52 lit 2 lit pick 10 lit + c!
+	54 lit 2 lit pick 11 lit + c!
+	00 lit 2 lit pick 12 lit + c!
+	12 lit 2 lit pick 13 lit + c!
+	34 lit 2 lit pick 14 lit + c!
+	56 lit 2 lit pick 15 lit + c!
+	\ ethertype 0800 (IPv4)
+	08 lit 2 lit pick 16 lit + c!
+	00 lit 2 lit pick 17 lit + c!
+	\ IP: ver/ihl 45, tos 0, totlen 44 (20+8+16), id = seq, no frag, ttl 64, udp
+	45 lit 2 lit pick 18 lit + c!
+	00 lit 2 lit pick 19 lit + c!
+	00 lit 2 lit pick 1A lit + c!
+	2C lit 2 lit pick 1B lit + c!
+	dup 8 lit rshift FF lit and 2 lit pick 1C lit + c!
+	dup FF lit and 2 lit pick 1D lit + c!
+	00 lit 2 lit pick 1E lit + c!
+	00 lit 2 lit pick 1F lit + c!
+	40 lit 2 lit pick 20 lit + c!
+	11 lit 2 lit pick 21 lit + c!
+	00 lit 2 lit pick 22 lit + c!   \ csum 0 while summing
+	00 lit 2 lit pick 23 lit + c!
+	0A lit 2 lit pick 24 lit + c!   \ src 10.0.2.15
+	00 lit 2 lit pick 25 lit + c!
+	02 lit 2 lit pick 26 lit + c!
+	0F lit 2 lit pick 27 lit + c!
+	0A lit 2 lit pick 28 lit + c!   \ dst 10.0.2.2
+	00 lit 2 lit pick 29 lit + c!
+	02 lit 2 lit pick 2A lit + c!
+	02 lit 2 lit pick 2B lit + c!
+	over 18 lit + ip_csum                          \ ( hbuf seq csum )
+	dup 8 lit rshift FF lit and 3 lit pick 22 lit + c!
+	FF lit and 2 lit pick 23 lit + c!              \ ( hbuf seq )
+	\ UDP: src 3333 (0D05), dst 47653 (BA25), len 24 (0018), csum 0 (legal v4)
+	0D lit 2 lit pick 2C lit + c!
+	05 lit 2 lit pick 2D lit + c!
+	BA lit 2 lit pick 2E lit + c!
+	25 lit 2 lit pick 2F lit + c!
+	00 lit 2 lit pick 30 lit + c!
+	18 lit 2 lit pick 31 lit + c!
+	00 lit 2 lit pick 32 lit + c!
+	00 lit 2 lit pick 33 lit + c!
+	drop drop
+;
+
+\ mkgarp ( hbuf -- )  build a gratuitous ARP request (0x34 B, header-only
+\ frame).  Sent once before the burst: slirp's arp_input learns the guest MAC
+\ from any ARP request's sender fields, so the hostfwd loopback can be
+\ re-encapsulated without slirp ARPing a guest that wouldn't answer.
+: mkgarp
+	dup 0 lit swap !  dup 4 lit + 0 lit swap !
+	dup 8 lit + 0 lit swap h!       \ 10-B vnet hdr
+	FF lit over A lit + c!  FF lit over B lit + c!   \ eth dst = broadcast
+	FF lit over C lit + c!  FF lit over D lit + c!
+	FF lit over E lit + c!  FF lit over F lit + c!
+	52 lit over 10 lit + c!         \ eth src = 52:54:00:12:34:56
+	54 lit over 11 lit + c!
+	00 lit over 12 lit + c!
+	12 lit over 13 lit + c!
+	34 lit over 14 lit + c!
+	56 lit over 15 lit + c!
+	08 lit over 16 lit + c!  06 lit over 17 lit + c!   \ ethertype ARP
+	00 lit over 18 lit + c!  01 lit over 19 lit + c!   \ htype ethernet
+	08 lit over 1A lit + c!  00 lit over 1B lit + c!   \ ptype IPv4
+	06 lit over 1C lit + c!  04 lit over 1D lit + c!   \ hlen 6, plen 4
+	00 lit over 1E lit + c!  01 lit over 1F lit + c!   \ op = request
+	52 lit over 20 lit + c!         \ sha = our MAC (what slirp learns)
+	54 lit over 21 lit + c!
+	00 lit over 22 lit + c!
+	12 lit over 23 lit + c!
+	34 lit over 24 lit + c!
+	56 lit over 25 lit + c!
+	0A lit over 26 lit + c!         \ spa = 10.0.2.15
+	00 lit over 27 lit + c!
+	02 lit over 28 lit + c!
+	0F lit over 29 lit + c!
+	00 lit over 2A lit + c!  00 lit over 2B lit + c!   \ tha = 0
+	00 lit over 2C lit + c!  00 lit over 2D lit + c!
+	00 lit over 2E lit + c!  00 lit over 2F lit + c!
+	0A lit over 30 lit + c!         \ tpa = 10.0.2.15 (gratuitous)
+	00 lit over 31 lit + c!
+	02 lit over 32 lit + c!
+	0F lit over 33 lit + c!
+	drop
+;
+
+\ counters for the burst test's collect loop
+: bcnt variable ;   \ loopback frames received
+: bsum variable ;   \ sum of their seqs (0..63 -> 0x7E0; catches dups/corruption)
+: bdl  variable ;   \ mtime deadline
 
 Test {
 	\ ip_csum of an all-zero 20-byte header is 0xFFFF (sum 0 -> ~0 & 0xFFFF).
@@ -236,42 +453,80 @@ Test {
 		tx_busy if 1 lit else 0 lit then 0 lit asrt_eq   \ idle
 		drop
 	}
-	\ tx_post builds desc[0] (addr=tx_buf, len=tx_len, flags 0), sets avail.idx, bumps
-	\ tx_aidx, and rings the doorbell (QueueNotify q1 = 1).
-	post1 {
-		100 lit alloc
-		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !   \ tx_q
-		100 lit alloc over !                                       \ dev (QueueNotify scratch)
-		40000000 lit over 10 lit + !                               \ tx_buf
-		2A lit over 24 lit + !                                     \ tx_len = 0x2A
-		7 lit over 1C lit + !                                      \ tx_aidx = 7
-		tx_post
-		dup 8 lit + @ @ 40000000 lit asrt_eq                       \ desc0.addr = tx_buf
-		dup 8 lit + @ 8 lit + @ 2A lit asrt_eq                     \ desc0.len  = tx_len
-		dup 8 lit + @ C lit + h@ 0 lit asrt_eq                     \ desc0.flags = 0
-		dup 8 lit + @ 22 lit + h@ 8 lit asrt_eq                    \ avail.idx = 8
-		dup 1C lit + @ 8 lit asrt_eq                               \ tx_aidx 7 -> 8
-		dup @ 50 lit + @ 1 lit asrt_eq                             \ QueueNotify wrote 1
-		drop                                                       \ ( consumes ns )
+	\ tx_setup pre-fills each slot's constant descriptor fields: desc0.addr = its
+	\ header buffer, desc0.next = 2s+1.  txnext points at the next slot's buffer.
+	tset {
+		100 lit alloc                                              \ ( ns )
+		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !   \ tx_q (aligned)
+		tx_setup
+		dup 8 lit + @ @ over 10 lit + @ asrt_eq                    \ slot0 d0.addr = tx_hdrs
+		dup 8 lit + @ E lit + h@ 1 lit asrt_eq                     \ slot0 d0.next = 1
+		dup 8 lit + @ A0 lit + @ over 10 lit + @ 140 lit + asrt_eq \ slot5 d0.addr = hdrs+0x140
+		dup 8 lit + @ AE lit + h@ B lit asrt_eq                    \ slot5 d0.next = 11
+		txnext over 10 lit + @ asrt_eq                             \ txnext -> slot0 hbuf
+		drop
 	}
-	\ tx_post2 builds the zero-copy 2-descriptor chain: desc0 = 0x3B-byte header (NEXT,
-	\ next=1), desc1 = payload BY REFERENCE (addr ns+0x3C, len ns+0x30).
-	post2 {
+	\ txq stages two zero-copy frames (slots 0,1) with NO doorbell and NO
+	\ avail.idx publish; tx_kick publishes both with ONE QueueNotify (q1).
+	tq2 {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !
+		100 lit alloc over !                              \ dev (QueueNotify scratch)
+		FFFFFFFF lit over @ 50 lit + !                    \ poison the doorbell
+		tx_setup
+		50000000 lit 20 lit 36 lit txq 0 lit asrt_eq      \ slot 0
+		50000100 lit 40 lit 36 lit txq 1 lit asrt_eq      \ slot 1
+		dup 8 lit + @ 802 lit + h@ 0 lit asrt_eq          \ avail.idx NOT published
+		dup @ 50 lit + @ FFFFFFFF lit asrt_eq             \ doorbell NOT rung
+		dup 1C lit + @ 2 lit asrt_eq                      \ tx_aidx = 2
+		dup 8 lit + @ 804 lit + h@ 0 lit asrt_eq          \ avail.ring[0] = head 0
+		dup 8 lit + @ 806 lit + h@ 2 lit asrt_eq          \ avail.ring[1] = head 2
+		dup 8 lit + @ 8 lit + @ 36 lit asrt_eq            \ slot0 d0.len = hlen
+		dup 8 lit + @ C lit + h@ 1 lit asrt_eq            \ slot0 d0.flags = NEXT
+		dup 8 lit + @ 10 lit + @ 50000000 lit asrt_eq     \ slot0 d1.addr = payload
+		dup 8 lit + @ 18 lit + @ 20 lit asrt_eq           \ slot0 d1.len = plen
+		dup 8 lit + @ 1C lit + h@ 0 lit asrt_eq           \ slot0 d1.flags = 0
+		dup 8 lit + @ 30 lit + @ 50000100 lit asrt_eq     \ slot1 d1.addr = payload B
+		tx_kick
+		dup 8 lit + @ 802 lit + h@ 2 lit asrt_eq          \ avail.idx published = 2
+		dup @ 50 lit + @ 1 lit asrt_eq                    \ ONE kick, queue 1
+		drop
+	}
+	\ txq with plen = 0 stages a header-only single-descriptor frame (flags 0).
+	tq1d {
 		100 lit alloc
 		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !
 		100 lit alloc over !
-		40000000 lit over 10 lit + !                    \ tx_buf (header)
-		50000000 lit over 3C lit + !                    \ zero-copy payload addr
-		578 lit over 30 lit + !                         \ payload length
-		0 lit over 1C lit + !                           \ tx_aidx 0
-		tx_post2
-		dup 8 lit + @ @ 40000000 lit asrt_eq            \ desc0.addr = tx_buf
-		dup 8 lit + @ 8 lit + @ 3B lit asrt_eq          \ desc0.len  = 0x3B
-		dup 8 lit + @ C lit + h@ 1 lit asrt_eq          \ desc0.flags = NEXT
-		dup 8 lit + @ E lit + h@ 1 lit asrt_eq          \ desc0.next  = 1
-		dup 8 lit + @ 10 lit + @ 50000000 lit asrt_eq   \ desc1.addr = payload (no copy)
-		dup 8 lit + @ 18 lit + @ 578 lit asrt_eq        \ desc1.len  = payload len
-		dup @ 50 lit + @ 1 lit asrt_eq                  \ QueueNotify wrote 1
+		tx_setup
+		0 lit 0 lit 2A lit txq drop
+		dup 8 lit + @ 8 lit + @ 2A lit asrt_eq   \ d0.len = hlen
+		dup 8 lit + @ C lit + h@ 0 lit asrt_eq   \ d0.flags = 0 (no NEXT)
+		8 lit + @ 804 lit + h@ 0 lit asrt_eq     \ ring[0] = head 0  ( consumes ns )
+	}
+	\ tx_poll reaps a drained frame (used.ring[0].id = 2 -> slot 1) into tx_done[].
+	tpol {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !
+		tx_setup
+		dup 8 lit + @ 1004 lit + 2 lit swap !    \ used.ring[0].id = 2 (slot 1)
+		dup 8 lit + @ 1002 lit + 1 lit swap h!   \ used.idx = 1
+		tx_poll
+		dup 3C lit + @ 1 lit asrt_eq                 \ tx_usd advanced
+		dup 1 lit txstat swap drop 1 lit asrt_eq     \ tx_done[1] = 1
+		0 lit txstat 0 lit asrt_eq                   \ tx_done[0] untouched
+		drop
+	}
+	\ txfree?: virgin slots are free; 64 staged with done[next]=0 is full;
+	\ a reaped next slot is free again.
+	tfree {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !
+		tx_setup
+		txfree? if 1 lit else 0 lit then 1 lit asrt_eq   \ virgin -> free
+		40 lit over 1C lit + !                           \ pretend 64 ever staged
+		txfree? if 1 lit else 0 lit then 0 lit asrt_eq   \ full, done[0]=0 -> not free
+		1 lit over 30 lit + @ !                          \ tx_done[0] = 1 (reaped)
+		txfree? if 1 lit else 0 lit then 1 lit asrt_eq   \ free again
 		drop
 	}
 	\ rx_poll: device posted a packet (used.idx advanced) -> return frame ptr and record
@@ -329,5 +584,62 @@ Test {
 		dup 4 lit + @ 102 lit + h@ 1 lit asrt_eq                   \ avail.idx -> 1
 		dup @ 50 lit + @ 0 lit asrt_eq                             \ QueueNotify wrote 0
 		20 lit + @ 1 lit asrt_eq                                   \ rx_last -> 1  ( consumes ns )
+	}
+	\ REAL NETWORK round trip (self-skips without --net): burst 64 UDP frames —
+	\ one per TX slot, the full pipeline, ONE tx_kick — through slirp to the
+	\ host, which hostfwds them straight back into the guest (scripts/test.sh
+	\ passes --hostfwd=udp::47653-:47653); collect them off the RX ring and
+	\ check all 64 seqs arrive.  Exercises txq/tx_kick/tx_poll AND
+	\ rx_poll/rx_done against the real device, slirp NAT both directions.
+	burst {
+		nfind ?dup if
+			40 lit alloc swap over !                                   \ ( ns )
+			3000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ rx_q
+			3000 lit alloc FFF lit + FFFFF000 lit and over 8 lit + !   \ tx_q
+			6000 lit alloc over C lit + !                              \ rx_bufs (16 x 0x600)
+			net_init rx_setup tx_setup
+			\ prime slirp's ARP table: one gratuitous ARP (header-only frame,
+			\ exercising the plen=0 single-descriptor path), drained before
+			\ the burst so its slot is free again
+			txnext mkgarp
+			0 lit 0 lit 34 lit txq drop
+			tx_kick
+			begin tx_poll tx_busy 0= until
+			\ stage 64 frames: seq s in payload s, header in slot s's buffer
+			400 lit alloc 0 lit            \ payloads 64 x 16 B  ( ns pay s )
+			begin dup 40 lit u< while
+				over over 4 lit lshift +   \ payload_s          ( ns pay s p )
+				over over !                \ p[0] = seq (u32 LE)
+				3 lit pick txnext          \ ( .. p ns hbuf )
+				3 lit pick mkhdr drop      \ ( ns pay s p )
+				3 lit pick swap            \ ( ns pay s ns p )
+				10 lit 34 lit txq
+				drop drop
+				1 lit +
+			repeat drop drop               \ ( ns )
+			tx_kick                        \ 64 frames, ONE doorbell
+			begin tx_poll tx_busy 0= until \ all 64 drained
+			\ collect the loopback: count UDP-to-47653 frames + sum their seqs
+			0 lit bcnt !  0 lit bsum !
+			_now 1312D00 lit + bdl !       \ 2 s deadline (20M ticks @ 10 MHz)
+			begin
+				bcnt @ 40 lit u<
+				_now bdl @ - 0< and        \ and deadline not reached
+			while
+				rx_poll ?dup if
+					dup 21 lit + c@ 11 lit = if    \ IPv4 proto = UDP?
+					dup 2E lit + c@ BA lit = if    \ dst port hi
+					dup 2F lit + c@ 25 lit = if    \ dst port lo = 47653
+						dup 34 lit + @ bsum @ + bsum !   \ seq (payload u32 LE)
+						bcnt @ 1 lit + bcnt !
+					then then then
+					drop
+					rx_done                \ re-post + kick
+				then
+			repeat
+			bcnt @ 40 lit asrt_eq          \ all 64 came back
+			bsum @ 7E0 lit asrt_eq         \ sum 0..63 — no dups, no corruption
+			drop
+		then
 	}
 }
