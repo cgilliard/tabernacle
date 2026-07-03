@@ -25,10 +25,14 @@ run() {
 		$disk_args > "$out"
 }
 
+# fsize FILE — size in bytes.  Portable: GNU stat spells it `-c %s`, BSD/macOS
+# `-f %z`; `wc -c` works everywhere (tr strips BSD wc's leading padding).
+fsize() { wc -c < "$1" | tr -d ' \t'; }
+
 pack() {
         in=$1; out=$2
         echo "Packing $in → $out" >&2
-        N=$(stat -c %s "$in")
+        N=$(fsize "$in")
         { printf "$(printf '\\%03o' $((N&255)) $(((N>>8)&255)) $(((N>>16)&255)) $(((N>>24)&255)))"
           cat "$in"
         } | qemu-system-riscv32 -machine virt -m "$MEM" -cpu "$CPU" \
@@ -40,9 +44,9 @@ pack() {
 patch_config() {
         bin=$1; data=$2
         echo "Patching $bin (bin_size + hash of $data)" >&2
-        N=$(stat -c %s "$data")
+        N=$(fsize "$data")
         NCHUNKS=$(( (N + 1399) / 1400 ))
-        TAB_SIZE=$(stat -c %s "$bin")
+        TAB_SIZE=$(fsize "$bin")
         # Layout at end of tabernacle: [nchunks 4B][bin_size 4B][hash 32B]
         # Write nchunks (LE) at TAB_SIZE-40
         printf "$(printf '\\%03o' $((NCHUNKS&255)) $(((NCHUNKS>>8)&255)) $(((NCHUNKS>>16)&255)) $(((NCHUNKS>>24)&255)))" \

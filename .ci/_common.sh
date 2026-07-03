@@ -4,6 +4,30 @@ setup_qemu() {
 		return 0
 	fi
 
+	if [ "$(uname -s)" = "Darwin" ]; then
+		# macOS runner: Homebrew.  The bottled qemu includes
+		# qemu-system-riscv32.  NO_AUTO_UPDATE skips the slow (and
+		# occasionally flaky) `brew update`; retry transient download
+		# failures.  (No GNU `timeout` on macOS — brew is bounded by the
+		# job-level timeout-minutes instead.)
+		export HOMEBREW_NO_AUTO_UPDATE=1
+		export HOMEBREW_NO_INSTALL_CLEANUP=1
+		if ! command -v qemu-system-riscv32 >/dev/null 2>&1; then
+			n=0
+			until [ "$n" -ge 3 ]; do
+				if brew install qemu; then
+					break
+				fi
+				n=$((n + 1))
+				echo "setup_qemu: brew attempt $n/3 failed, retrying in 15s..." >&2
+				sleep 15
+			done
+			[ "$n" -lt 3 ] || { echo "setup_qemu: brew failed after 3 attempts" >&2; return 1; }
+		fi
+		qemu-system-riscv32 --version | head -1
+		return 0
+	fi
+
     # GitHub runners run unattended-upgrades at boot, which holds the dpkg lock.
     # Without DPkg::Lock::Timeout, apt-get blocks on the lock INDEFINITELY with no
     # output (the old `-qq ... >/dev/null` hid it) -> the random "hangs forever".
