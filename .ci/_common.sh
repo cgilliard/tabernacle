@@ -12,6 +12,12 @@ setup_qemu() {
 		# job-level timeout-minutes instead.)
 		export HOMEBREW_NO_AUTO_UPDATE=1
 		export HOMEBREW_NO_INSTALL_CLEANUP=1
+		# The runner image preinstalls third-party taps (e.g. aws/tap) that
+		# brew's tap-trust check warns about on every command.  We only
+		# install from homebrew/core (implicitly trusted), so drop them.
+		for t in $(brew tap 2>/dev/null | grep -v '^homebrew/' || :); do
+			brew untap "$t" 2>/dev/null || :
+		done
 		if ! command -v qemu-system-riscv32 >/dev/null 2>&1; then
 			n=0
 			until [ "$n" -ge 3 ]; do
