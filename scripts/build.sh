@@ -6,6 +6,12 @@ zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,\
 zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false"
 MEM="128M"
 
+# Serial I/O goes through FILES (-chardev file,input-path=...), not stdio
+# pipes: QEMU's win32 stdio chardev loses bytes on piped stdin (byte-at-a-time
+# reader thread), which silently corrupted Windows CI builds.  File-backed
+# serial is byte-exact on every platform, so it's the one code path everywhere.
+# Temp files live NEXT TO the output (relative paths): MSYS path-conversion
+# heuristics on absolute /tmp paths inside comma-separated args are unreliable.
 run() {
 	out=$1; asm=$2; shift 2
 	disk_args=""; disk=""
@@ -16,13 +22,16 @@ run() {
 		shift 2
 	fi
 	[ $# -gt 0 ] && echo "Building $* → $out" >&2
-	([ $# -gt 0 ] && cat "$@"; printf '\004') | qemu-system-riscv32 \
+	stream="$out.in.$$"
+	([ $# -gt 0 ] && cat "$@"; printf '\004') > "$stream"
+	qemu-system-riscv32 \
 		-machine virt -m "$MEM" -cpu "$CPU" \
 		-display none -bios none \
-		-chardev stdio,id=ser0,mux=off,signal=off \
+		-chardev file,id=ser0,path="$out",input-path="$stream" \
 		-serial chardev:ser0 \
 		-device loader,file="$asm",addr=0x80000000 \
-		$disk_args > "$out"
+		$disk_args
+	rm -f "$stream"
 }
 
 # fsize FILE — size in bytes.  Portable: GNU stat spells it `-c %s`, BSD/macOS
@@ -33,12 +42,16 @@ pack() {
         in=$1; out=$2
         echo "Packing $in → $out" >&2
         N=$(fsize "$in")
+        stream="$out.in.$$"
         { printf "$(printf '\\%03o' $((N&255)) $(((N>>8)&255)) $(((N>>16)&255)) $(((N>>24)&255)))"
           cat "$in"
-        } | qemu-system-riscv32 -machine virt -m "$MEM" -cpu "$CPU" \
+        } > "$stream"
+        qemu-system-riscv32 -machine virt -m "$MEM" -cpu "$CPU" \
                 -display none -bios none \
-                -chardev stdio,id=ser0,mux=off,signal=off -serial chardev:ser0 \
-                -device loader,file=bin/fampack,addr=0x80000000 > "$out"
+                -chardev file,id=ser0,path="$out",input-path="$stream" \
+                -serial chardev:ser0 \
+                -device loader,file=bin/fampack,addr=0x80000000
+        rm -f "$stream"
 }
 
 patch_config() {
@@ -54,17 +67,20 @@ patch_config() {
         # Write bin_size (LE) at TAB_SIZE-36
         printf "$(printf '\\%03o' $((N&255)) $(((N>>8)&255)) $(((N>>16)&255)) $(((N>>24)&255)))" \
                 | dd of="$bin" bs=1 seek=$((TAB_SIZE - 36)) conv=notrunc 2>/dev/null
-        # Write hash at TAB_SIZE-32
-        ghash_input=$(mktemp)
+        # Write hash at TAB_SIZE-32.  gen_hash reads its input via the loader
+        # (no serial input) and emits the digest on serial -> file chardev.
+        ghash_input="$bin.ghin.$$"
+        ghash_out="$bin.ghout.$$"
         { printf "$(printf '\\%03o' $((N&255)) $(((N>>8)&255)) $(((N>>16)&255)) $(((N>>24)&255)))"
           cat "$data"
         } > "$ghash_input"
-        HASH=$(qemu-system-riscv32 -machine virt -m "$MEM" -cpu "$CPU" \
+        qemu-system-riscv32 -machine virt -m "$MEM" -cpu "$CPU" \
                 -display none -bios none \
-                -chardev stdio,id=ser0,mux=off,signal=off -serial chardev:ser0 \
+                -chardev file,id=ser0,path="$ghash_out" -serial chardev:ser0 \
                 -device loader,file=bin/gen_hash,addr=0x80000000 \
-                -device loader,file="$ghash_input",addr=0x80800000 2>/dev/null)
-        rm -f "$ghash_input"
+                -device loader,file="$ghash_input",addr=0x80800000 2>/dev/null
+        HASH=$(cat "$ghash_out")
+        rm -f "$ghash_input" "$ghash_out"
         [ $(echo $HASH | wc -w) -eq 8 ] || { echo "gen_hash failed"; exit 1; }
         LEHEX=""
         for word in $HASH; do

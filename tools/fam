@@ -96,9 +96,16 @@ if [ ! -f "$HEADER" ]; then echo "fam: header not found: $HEADER" >&2; exit 1; f
 # the order given, so earlier files may define words later ones use). In --test/
 # --bench the tail closes the block chain (`_tend`) and prints the summary before
 # halting; the trailing `bye` is a safety halt.
+# The source stream goes through a FILE (q32 --in/--out, file-backed serial),
+# not a pipe: QEMU's win32 stdio chardev loses bytes on piped stdin.  The temp
+# file sits next to the output (relative path — MSYS path conversion of
+# absolute /tmp paths inside comma-separated qemu args is unreliable).
 if [ "$TEST" = 1 ] || [ "$BENCH" = 1 ]; then TAIL='_tend
 bye'; else TAIL='bye'; fi
-( cat "$STDLIB" "$HEADER" $IN; printf '\n%s\n\004' "$TAIL" ) | "$Q32" "$FAMC" > "$OUT"
+STREAM="$OUT.in.$$"
+( cat "$STDLIB" "$HEADER" $IN; printf '\n%s\n\004' "$TAIL" ) > "$STREAM"
+"$Q32" --in="$STREAM" --out="$OUT" "$FAMC"
+rm -f "$STREAM"
 
 # --- verify the output is a real fam binary (begins with the q32 magic) ---
 MAGIC=$(head -c 4 "$OUT" 2>/dev/null | xxd -p)

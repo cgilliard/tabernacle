@@ -5,6 +5,10 @@
 #   --cpu=CPU     CPU model (default: rv32i strict)
 #   --net         Enable virtio-net (user-mode NAT)
 #   --disk=FILE   Attach FILE as virtio-blk disk
+#   --in=FILE     serial input from FILE  ┐ file-backed serial instead of stdio:
+#   --out=FILE    serial output to FILE   ┘ byte-exact on every platform (QEMU's
+#                 win32 stdio chardev loses bytes on piped stdin); used by
+#                 tools/fam for the compile step.  --out required with --in.
 #
 # Examples:
 #   q32 program.bin
@@ -21,6 +25,8 @@ DISK=""
 HOSTFWD=""
 NETDEV=""
 MAC=""
+SERIN=""
+SEROUT=""
 
 for arg in "$@"; do
 	case "$arg" in
@@ -30,6 +36,8 @@ for arg in "$@"; do
 		--hostfwd=*) HOSTFWD="${arg#--hostfwd=}" ;;
 		--netdev=*) NETDEV="${arg#--netdev=}" ;;
 		--mac=*) MAC="${arg#--mac=}" ;;
+		--in=*) SERIN="${arg#--in=}" ;;
+		--out=*) SEROUT="${arg#--out=}" ;;
 		--help|-h)
 			echo "Usage: $0 [--cpu=CPU] [--net] [--disk=FILE] [--hostfwd=SPEC] [--netdev=SPEC] [--mac=ADDR] <binary>"
 			echo "  --hostfwd=udp::HOST_PORT-:GUEST_PORT  expose guest UDP port to host"
@@ -58,10 +66,21 @@ if [ "$MAGIC" != "13000000" ]; then
 	exit 1
 fi
 
+if [ -n "$SERIN" ] && [ -z "$SEROUT" ]; then
+	echo "Error: --in requires --out (file chardev needs an output path)"
+	exit 1
+fi
+
 # Build QEMU arguments
 ARGS="-machine virt -cpu $CPU -nographic -bios none"
 ARGS="$ARGS -device loader,file=$FILE,addr=0x80000000"
-ARGS="$ARGS -serial stdio -monitor none"
+if [ -n "$SEROUT" ]; then
+	CHR="-chardev file,id=ser0,path=$SEROUT"
+	[ -n "$SERIN" ] && CHR="$CHR,input-path=$SERIN"
+	ARGS="$ARGS $CHR -serial chardev:ser0 -monitor none"
+else
+	ARGS="$ARGS -serial stdio -monitor none"
+fi
 
 if [ -n "$NETDEV" ] || [ "$NET" = "1" ]; then
 	ARGS="$ARGS -global virtio-mmio.force-legacy=true"
