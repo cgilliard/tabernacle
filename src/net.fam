@@ -110,6 +110,7 @@
 	dup 4 lit + @ 1002 lit + h@   \ RX used.idx
 	over 20 lit + @               \ rx_last
 	<> if
+		fence_r                   \ order used-ring + frame DMA reads after idx
 		dup 20 lit + @ F lit and 3 lit lshift
 		over 4 lit + @ + 1004 lit + @   \ used.ring[rx_last & 15].id
 		over 38 lit + !                 \ ns+0x38 = desc id
@@ -123,9 +124,10 @@
 	then
 ;
 
-\ rx_done ( ns -- ns )  re-post the just-consumed RX buffer to the avail ring + kick,
-\ and advance rx_last.  Call once you are finished reading the frame.
-: rx_done
+\ rx_qdone ( ns -- ns )  re-post the just-consumed RX buffer to the avail ring
+\ and advance rx_last — NO doorbell.  Batch: N x rx_qdone then ONE rx_kick
+\ (one VM exit re-arms the whole batch).  Call once done reading the frame.
+: rx_qdone
 	dup 4 lit + @ 102 lit + h@
 	over 28 lit + !
 	dup 28 lit + @ F lit and 1 lit lshift
@@ -133,10 +135,19 @@
 	over 38 lit + @ swap h!
 	dup 28 lit + @ 1 lit +
 	over 4 lit + @ 102 lit + h!
-	dup @ 50 lit + 0 lit swap !
 	dup 20 lit + @ 1 lit + FFFF lit and
 	over 20 lit + !
 ;
+
+\ rx_kick ( ns -- ns )  ring the RX doorbell for everything re-posted since the
+\ last kick.
+: rx_kick
+	fence_io
+	dup @ 50 lit + 0 lit swap !   \ QueueNotify queue 0
+;
+
+\ rx_done ( ns -- ns )  re-post + kick, one call (rx_qdone + rx_kick).
+: rx_done rx_qdone rx_kick ;
 
 \ tx_post ( ns -- ns )  hand the frame in tx_buf (length ns+0x24) to the TX queue and
 \ ring the doorbell.  Returns immediately — does NOT wait for the transmit to drain.
@@ -284,6 +295,25 @@ Test {
 		5 lit over 4 lit + @ 1002 lit + h!   \ used.idx = 5 == rx_last
 		rx_poll 0 lit asrt_eq
 		drop
+	}
+	\ rx_qdone re-posts WITHOUT ringing the doorbell (batch); rx_kick publishes
+	\ one QueueNotify for the whole batch.  (rx_done = rx_qdone rx_kick.)
+	rxq {
+		100 lit alloc
+		5000 lit alloc FFF lit + FFFFF000 lit and over 4 lit + !   \ rx_q
+		100 lit alloc over !                                       \ dev
+		FFFFFFFF lit over @ 50 lit + !                             \ poison the doorbell scratch
+		3 lit over 38 lit + !                                      \ consumed desc id = 3
+		0 lit over 20 lit + !                                      \ rx_last = 0
+		0 lit over 4 lit + @ 102 lit + h!                          \ RX avail.idx = 0
+		rx_qdone
+		dup 4 lit + @ 104 lit + h@ 3 lit asrt_eq                   \ avail.ring[0] = desc 3
+		dup 4 lit + @ 102 lit + h@ 1 lit asrt_eq                   \ avail.idx -> 1
+		dup 20 lit + @ 1 lit asrt_eq                               \ rx_last -> 1
+		dup @ 50 lit + @ FFFFFFFF lit asrt_eq                      \ doorbell NOT rung
+		rx_kick
+		dup @ 50 lit + @ 0 lit asrt_eq                             \ one kick for the batch
+		drop                                                       \ ( consumes ns )
 	}
 	\ rx_done re-posts the consumed RX desc id to the avail ring, bumps avail.idx + rx_last,
 	\ and kicks (QueueNotify q0 = 0).
