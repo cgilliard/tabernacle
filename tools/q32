@@ -71,12 +71,26 @@ if [ -n "$SERIN" ] && [ -z "$SEROUT" ]; then
 	exit 1
 fi
 
+# --in/--out transport: POSIX uses the file chardev (byte-exact, no deps);
+# Windows QEMU rejects input-path, so use a loopback TCP chardev + the
+# tools/serial_io.py pump instead.  FAM_SERIAL=socket forces the socket path
+# (lets the Windows transport be tested on Linux).
+SOCKMODE=0
+case "$(uname -s)" in MINGW*|MSYS*) SOCKMODE=1 ;; esac
+[ "$FAM_SERIAL" = "socket" ] && SOCKMODE=1
+
 # Build QEMU arguments
 ARGS="-machine virt -cpu $CPU -nographic -bios none"
 ARGS="$ARGS -device loader,file=$FILE,addr=0x80000000"
+SERPORT=""
 if [ -n "$SEROUT" ]; then
-	CHR="-chardev file,id=ser0,path=$SEROUT"
-	[ -n "$SERIN" ] && CHR="$CHR,input-path=$SERIN"
+	if [ "$SOCKMODE" = 1 ]; then
+		SERPORT=$((20000 + $$ % 20000))
+		CHR="-chardev socket,id=ser0,host=127.0.0.1,port=$SERPORT,server=on,wait=on"
+	else
+		CHR="-chardev file,id=ser0,path=$SEROUT"
+		[ -n "$SERIN" ] && CHR="$CHR,input-path=$SERIN"
+	fi
 	ARGS="$ARGS $CHR -serial chardev:ser0 -monitor none"
 else
 	ARGS="$ARGS -serial stdio -monitor none"
@@ -106,6 +120,20 @@ if [ -n "$DISK" ]; then
 	ARGS="$ARGS -global virtio-mmio.force-legacy=true"
 	ARGS="$ARGS -drive file=$DISK,format=raw,if=none,id=d0"
 	ARGS="$ARGS -device virtio-blk-device,drive=d0"
+fi
+
+if [ -n "$SERPORT" ]; then
+	# socket serial: qemu in the background, the pump in the foreground;
+	# qemu's exit code (guest finisher) is the verdict.
+	SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
+	TOOLS=$(dirname "$SCRIPT")
+	PY=$(command -v python3 || command -v python)
+	IN="${SERIN:--}"   # "-" tells serial_io.py there is no input stream
+	qemu-system-riscv32 $ARGS 2>/dev/null &
+	QPID=$!
+	"$PY" "$TOOLS/serial_io.py" "$SERPORT" "$IN" "$SEROUT" || { kill $QPID 2>/dev/null; exit 1; }
+	wait $QPID
+	exit $?
 fi
 
 # exec so signals (and `timeout`) reach qemu directly and `$!` is the qemu pid

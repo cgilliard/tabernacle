@@ -6,12 +6,42 @@ zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,\
 zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false"
 MEM="128M"
 
-# Serial I/O goes through FILES (-chardev file,input-path=...), not stdio
-# pipes: QEMU's win32 stdio chardev loses bytes on piped stdin (byte-at-a-time
-# reader thread), which silently corrupted Windows CI builds.  File-backed
-# serial is byte-exact on every platform, so it's the one code path everywhere.
+# Serial I/O goes through FILES or a LOOPBACK SOCKET, never stdio pipes:
+# QEMU's win32 stdio chardev loses bytes on piped stdin (byte-at-a-time reader
+# thread), which silently corrupted Windows CI builds.
+#   POSIX:   -chardev file,input-path=...   (byte-exact, no dependencies)
+#   Windows: -chardev socket + tools/serial_io.py pump — the win32 QEMU build
+#            rejects input-path outright ("not supported on Windows").
+# FAM_SERIAL=socket forces the socket path, so it is testable on Linux.
 # Temp files live NEXT TO the output (relative paths): MSYS path-conversion
 # heuristics on absolute /tmp paths inside comma-separated args are unreliable.
+serial_qemu() {  # serial_qemu INFILE OUTFILE [extra qemu args...]
+	sin=$1; sout=$2; shift 2
+	sock=0
+	case "$(uname -s)" in MINGW*|MSYS*) sock=1 ;; esac
+	[ "$FAM_SERIAL" = "socket" ] && sock=1
+	if [ "$sock" = 1 ]; then
+		PY=$(command -v python3 || command -v python)
+		port=$((20000 + $$ % 20000))
+		qemu-system-riscv32 \
+			-machine virt -m "$MEM" -cpu "$CPU" \
+			-display none -bios none \
+			-chardev socket,id=ser0,host=127.0.0.1,port=$port,server=on,wait=on \
+			-serial chardev:ser0 \
+			"$@" &
+		qpid=$!
+		"$PY" tools/serial_io.py "$port" "$sin" "$sout"
+		wait $qpid
+	else
+		qemu-system-riscv32 \
+			-machine virt -m "$MEM" -cpu "$CPU" \
+			-display none -bios none \
+			-chardev file,id=ser0,path="$sout",input-path="$sin" \
+			-serial chardev:ser0 \
+			"$@"
+	fi
+}
+
 run() {
 	out=$1; asm=$2; shift 2
 	disk_args=""; disk=""
@@ -24,11 +54,7 @@ run() {
 	[ $# -gt 0 ] && echo "Building $* → $out" >&2
 	stream="$out.in.$$"
 	([ $# -gt 0 ] && cat "$@"; printf '\004') > "$stream"
-	qemu-system-riscv32 \
-		-machine virt -m "$MEM" -cpu "$CPU" \
-		-display none -bios none \
-		-chardev file,id=ser0,path="$out",input-path="$stream" \
-		-serial chardev:ser0 \
+	serial_qemu "$stream" "$out" \
 		-device loader,file="$asm",addr=0x80000000 \
 		$disk_args
 	rm -f "$stream"
@@ -46,11 +72,7 @@ pack() {
         { printf "$(printf '\\%03o' $((N&255)) $(((N>>8)&255)) $(((N>>16)&255)) $(((N>>24)&255)))"
           cat "$in"
         } > "$stream"
-        qemu-system-riscv32 -machine virt -m "$MEM" -cpu "$CPU" \
-                -display none -bios none \
-                -chardev file,id=ser0,path="$out",input-path="$stream" \
-                -serial chardev:ser0 \
-                -device loader,file=bin/fampack,addr=0x80000000
+        serial_qemu "$stream" "$out" -device loader,file=bin/fampack,addr=0x80000000
         rm -f "$stream"
 }
 
@@ -68,19 +90,20 @@ patch_config() {
         printf "$(printf '\\%03o' $((N&255)) $(((N>>8)&255)) $(((N>>16)&255)) $(((N>>24)&255)))" \
                 | dd of="$bin" bs=1 seek=$((TAB_SIZE - 36)) conv=notrunc 2>/dev/null
         # Write hash at TAB_SIZE-32.  gen_hash reads its input via the loader
-        # (no serial input) and emits the digest on serial -> file chardev.
+        # (no serial input, so feed an empty stream) and emits the digest on
+        # the serial output file.
         ghash_input="$bin.ghin.$$"
         ghash_out="$bin.ghout.$$"
+        ghash_nul="$bin.ghnul.$$"
         { printf "$(printf '\\%03o' $((N&255)) $(((N>>8)&255)) $(((N>>16)&255)) $(((N>>24)&255)))"
           cat "$data"
         } > "$ghash_input"
-        qemu-system-riscv32 -machine virt -m "$MEM" -cpu "$CPU" \
-                -display none -bios none \
-                -chardev file,id=ser0,path="$ghash_out" -serial chardev:ser0 \
+        : > "$ghash_nul"
+        serial_qemu "$ghash_nul" "$ghash_out" \
                 -device loader,file=bin/gen_hash,addr=0x80000000 \
                 -device loader,file="$ghash_input",addr=0x80800000 2>/dev/null
         HASH=$(cat "$ghash_out")
-        rm -f "$ghash_input" "$ghash_out"
+        rm -f "$ghash_input" "$ghash_out" "$ghash_nul"
         [ $(echo $HASH | wc -w) -eq 8 ] || { echo "gen_hash failed"; exit 1; }
         LEHEX=""
         for word in $HASH; do
