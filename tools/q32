@@ -127,11 +127,10 @@ if [ -n "$SERPORT" ]; then
 	# qemu's exit code (guest finisher) is the verdict.
 	SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
 	TOOLS=$(dirname "$SCRIPT")
-	PY=$(command -v python3 || command -v python)
-	IN="${SERIN:--}"   # "-" tells serial_io.py there is no input stream
+	IN="${SERIN:--}"   # "-" tells serial_pump there is no input stream
 	qemu-system-riscv32 $ARGS 2>/dev/null &
 	QPID=$!
-	"$PY" "$TOOLS/serial_io.py" "$SERPORT" "$IN" "$SEROUT" || { kill $QPID 2>/dev/null; exit 1; }
+	"$TOOLS/serial_pump" "$SERPORT" "$IN" "$SEROUT" || { kill $QPID 2>/dev/null; exit 1; }
 	wait $QPID
 	exit $?
 fi

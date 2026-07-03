@@ -10,9 +10,10 @@ MEM="128M"
 # QEMU's win32 stdio chardev loses bytes on piped stdin (byte-at-a-time reader
 # thread), which silently corrupted Windows CI builds.
 #   POSIX:   -chardev file,input-path=...   (byte-exact, no dependencies)
-#   Windows: -chardev socket + tools/serial_io.py pump — the win32 QEMU build
-#            rejects input-path outright ("not supported on Windows").
+#   Windows: -chardev socket + tools/serial_pump (pure bash /dev/tcp) — the
+#            win32 QEMU build rejects input-path ("not supported on Windows").
 # FAM_SERIAL=socket forces the socket path, so it is testable on Linux.
+# Either way the build chain stays shell + qemu only.
 # Temp files live NEXT TO the output (relative paths): MSYS path-conversion
 # heuristics on absolute /tmp paths inside comma-separated args are unreliable.
 serial_qemu() {  # serial_qemu INFILE OUTFILE [extra qemu args...]
@@ -21,7 +22,6 @@ serial_qemu() {  # serial_qemu INFILE OUTFILE [extra qemu args...]
 	case "$(uname -s)" in MINGW*|MSYS*) sock=1 ;; esac
 	[ "$FAM_SERIAL" = "socket" ] && sock=1
 	if [ "$sock" = 1 ]; then
-		PY=$(command -v python3 || command -v python)
 		port=$((20000 + $$ % 20000))
 		qemu-system-riscv32 \
 			-machine virt -m "$MEM" -cpu "$CPU" \
@@ -30,7 +30,7 @@ serial_qemu() {  # serial_qemu INFILE OUTFILE [extra qemu args...]
 			-serial chardev:ser0 \
 			"$@" &
 		qpid=$!
-		"$PY" tools/serial_io.py "$port" "$sin" "$sout"
+		tools/serial_pump "$port" "$sin" "$sout"
 		wait $qpid
 	else
 		qemu-system-riscv32 \
