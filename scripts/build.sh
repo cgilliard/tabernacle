@@ -113,20 +113,7 @@ patch_config() {
 }
 
 run bin/fam0 fam0.seed src/fam0.fam0
-cmp ./bin/fam0 ./fam0.seed || {
-	# Self-diagnosing failure: the byte-level truth identifies the cause
-	# class at a glance — built starting 0x3F is the compiler's `?` abort
-	# (input problem); leading text/escape bytes = emulator stdout noise;
-	# a seed head that isn't 130ba000... = corrupted checkout; length skew
-	# with 0d0a pairs = line-ending translation somewhere in the pipe.
-	echo "fam0: binaries don't match!"
-	echo "  qemu:   $(qemu-system-riscv32 --version | head -1)"
-	echo "  built:  $(fsize bin/fam0) B  head: $(xxd -p -c 32 -l 32 bin/fam0)"
-	echo "  seed:   $(fsize fam0.seed) B  head: $(xxd -p -c 32 -l 32 fam0.seed)"
-	echo "  source: $(fsize src/fam0.fam0) B  line1: $(head -1 src/fam0.fam0 | xxd -p)"
-	echo "  autocrlf: $(git config core.autocrlf || echo unset)"
-	exit 1
-}
+cmp ./bin/fam0 ./fam0.seed
 run bin/fam.uncompressed bin/fam0 src/fam.fam0
 run bin/fampack bin/fam.uncompressed lib/stdlib.fam lib/asm.fam src/fampack.fam
 pack bin/fam.uncompressed bin/fam
