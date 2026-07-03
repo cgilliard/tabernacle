@@ -73,8 +73,8 @@ fi
 
 # --in/--out transport: POSIX uses the file chardev (byte-exact, no deps);
 # Windows QEMU rejects input-path, so use a loopback TCP chardev + the
-# tools/serial_io.py pump instead.  FAM_SERIAL=socket forces the socket path
-# (lets the Windows transport be tested on Linux).
+# tools/serial_pump (pure bash) instead.  FAM_SERIAL=socket forces the socket
+# path (lets the Windows transport be tested on Linux).
 SOCKMODE=0
 case "$(uname -s)" in MINGW*|MSYS*) SOCKMODE=1 ;; esac
 [ "$FAM_SERIAL" = "socket" ] && SOCKMODE=1
