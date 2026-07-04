@@ -109,20 +109,6 @@
 	loop
 ;
 
-\ ── bp_wb ( bp framep -- bp framep )  write the frame back IF dirty; clear
-\ dirty.  Blocking + verified (single-frame path: eviction).  Bulk writeback
-\ goes through the BATCHED bp_flush instead. ──
-: bp_wb
-	dup 204 lit + @ 1 lit and if          \ dirty?
-		1 lit pick @                      \ ds = bp.ds        ( bp framep ds )
-		over 200 lit + @                  \ page (= sector)   ( bp framep ds page )
-		2 lit pick                        \ buf = framep      ( bp framep ds page framep )
-		vwrite                            \ ( bp framep ds id )
-		vdone drop                        \ completed OK (or died) ( bp framep )
-		dup 204 lit + dup @ FFFFFFFE lit and swap !   \ clear dirty bit0
-	then
-;
-
 \ ── h_ins ( bp framep -- )  insert framep at the head of its page's hash
 \ bucket (framep.page must already be set) ──
 : h_ins
@@ -154,9 +140,70 @@
 	then
 ;
 
+\ ── bp_flush ( bp -- bp )  BATCHED writeback: stage every dirty frame with
+\ vqwrite (no doorbell), publish the whole batch with ONE vkick, drain, then
+\ verify each completion and clear its dirty bit.  One VM exit for the whole
+\ batch instead of one sync write per page (~35 us/page sync -> ~2 us batched).
+\ nframes <= 0x40 (bp_init) keeps the batch under disk.fam's nslots.  Called by
+\ commit (durability then via the caller's vflush) AND by bp_evict to clean the
+\ pool ahead of eviction.
+\ Called at COMMIT (pool quiescent, everything unpinned).  Only writes UNPINNED
+\ dirty frames — a defensive gate so it is never called mid-construction on a
+\ pinned frame. ──
+: bp_flush
+	0 lit                                 \ staged count ( bp n )
+	over 4 lit + @ 0 lit do
+		1 lit pick i frm                  \ ( bp n framep )
+		dup 204 lit + @ 1 lit and over 208 lit + @ 0 lit = and if   \ dirty AND unpinned?
+			2 lit pick @                  \ ds              ( bp n framep ds )
+			over 200 lit + @              \ page (= sector) ( bp n framep ds page )
+			2 lit pick 1 lit              \ buf, nsec=1     ( .. framep ds page framep 1 )
+			vqwrite                       \ stage, NO kick  ( bp n framep ds id )
+			2 lit pick 20C lit + !        \ frame.slot = id ( bp n framep ds )
+			drop drop                     \ ( bp n )
+			1 lit +                       \ n++
+		else drop then
+	loop
+	dup if                                \ anything staged?
+		over @ vkick                      \ ONE doorbell for the whole batch ( bp n ds )
+		begin                             \ drain: all submitted == all reaped
+			vpoll
+			dup 8 lit + @ over C lit + @ =
+		until
+		drop                              \ ( bp n )
+		over 4 lit + @ 0 lit do           \ verify + clear each staged frame
+			1 lit pick i frm              \ ( bp n framep )
+			dup 204 lit + @ 1 lit and over 208 lit + @ 0 lit = and if   \ same gate as staging
+				2 lit pick @ over 20C lit + @ vstat   \ ( bp n framep ds st )
+				vchk drop                 \ st == 1 or die; drop ds ( bp n framep )
+				dup 204 lit + dup @ FFFFFFFE lit and swap !   \ clear dirty
+			then
+			drop
+		loop
+	then
+	drop                                  \ ( bp )
+;
+
+\ ── bp_wb ( bp framep -- bp framep )  write the frame back IF dirty; clear
+\ dirty.  Blocking + verified single-frame writeback (the eviction path). ──
+: bp_wb
+	dup 204 lit + @ 1 lit and if          \ dirty?
+		1 lit pick @                      \ ds = bp.ds        ( bp framep ds )
+		over 200 lit + @                  \ page (= sector)   ( bp framep ds page )
+		2 lit pick                        \ buf = framep      ( bp framep ds page framep )
+		vwrite                            \ ( bp framep ds id )
+		vdone drop                        \ completed OK (or died) ( bp framep )
+		dup 204 lit + dup @ FFFFFFFE lit and swap !   \ clear dirty bit0
+	then
+;
+
 \ ── bp_evict ( bp -- bp framep )  CLOCK second-chance: pick an unpinned
-\ victim, writing it back if dirty.  Fail-stops if every frame is pinned (a
-\ guard the trie's pin discipline must keep from firing). ──
+\ victim, writing it back if dirty (single-frame SYNC writeback via bp_wb).
+\ Fail-stops if every frame is pinned (a guard the trie's pin discipline must
+\ not fire).  NOTE: a large txn whose dirty set exceeds the pool pays ~35 us
+\ sync per evicted page; batching that writeback safely (without the async
+\ completion race a naive bp_flush-here introduced) is future work — the safe
+\ mitigation today is sizing the pool to the txn or committing more often. ──
 : bp_evict
 	0 lit 0 lit                           \ ( bp cnt result )
 	begin dup 0= while                    \ loop while no victim chosen yet
@@ -179,7 +226,7 @@
 		then
 	repeat                                \ ( bp cnt framep )
 	swap drop                             \ ( bp framep )
-	bp_wb                                 \ write back if dirty (verified)
+	bp_wb                                 \ write back if dirty (sync, verified)
 	2dup h_rem                            \ unlink victim from its (old) hash bucket
 	FFFFFFFF lit over 200 lit + !         \ page = EMPTY (caller sets the new page + h_ins)
 ;
@@ -271,46 +318,6 @@
 \ ── bp_unpin ( framep -- )  release one pin ──
 : bp_unpin
 	dup 208 lit + dup @ 1 lit - swap ! drop
-;
-
-\ ── bp_flush ( bp -- bp )  BATCHED writeback: stage every dirty frame with
-\ vqwrite (no doorbell), publish the whole batch with ONE vkick, drain, then
-\ verify each completion and clear its dirty bit.  One VM exit per commit
-\ instead of one per page (the sync path costs ~35 us/page; batched ~2 us).
-\ nframes <= 0x40 (bp_init) keeps the batch under disk.fam's nslots.
-\ Durability is the caller's vflush (see commit). ──
-: bp_flush
-	0 lit                                 \ staged count ( bp n )
-	over 4 lit + @ 0 lit do
-		1 lit pick i frm                  \ ( bp n framep )
-		dup 204 lit + @ 1 lit and if      \ dirty?
-			2 lit pick @                  \ ds              ( bp n framep ds )
-			over 200 lit + @              \ page (= sector) ( bp n framep ds page )
-			2 lit pick 1 lit              \ buf, nsec=1     ( .. framep ds page framep 1 )
-			vqwrite                       \ stage, NO kick  ( bp n framep ds id )
-			2 lit pick 20C lit + !        \ frame.slot = id ( bp n framep ds )
-			drop drop                     \ ( bp n )
-			1 lit +                       \ n++
-		else drop then
-	loop
-	dup if                                \ anything staged?
-		over @ vkick                      \ ONE doorbell for the whole batch ( bp n ds )
-		begin                             \ drain: all submitted == all reaped
-			vpoll
-			dup 8 lit + @ over C lit + @ =
-		until
-		drop                              \ ( bp n )
-		over 4 lit + @ 0 lit do           \ verify + clear each staged frame
-			1 lit pick i frm              \ ( bp n framep )
-			dup 204 lit + @ 1 lit and if
-				2 lit pick @ over 20C lit + @ vstat   \ ( bp n framep ds st )
-				vchk drop                 \ st == 1 or die; drop ds ( bp n framep )
-				dup 204 lit + dup @ FFFFFFFE lit and swap !   \ clear dirty
-			then
-			drop
-		loop
-	then
-	drop                                  \ ( bp )
 ;
 
 \ ── bp_drop ( bp -- bp )  discard every DIRTY (uncommitted COW) frame: mark
@@ -460,6 +467,19 @@
 \ ── wroot@ ( eng -- page ) / wroot! ( eng page -- )  working trie root ──
 : wroot@  4 lit + @ 8 lit + @ ;
 : wroot!  swap 4 lit + @ 8 lit + ! ;
+
+\ ── eng_fmt ( eng -- eng )  INVALIDATE both meta pages (write zeros) so a
+\ following mt_boot takes its fresh-disk "neither valid -> genesis" path and
+\ starts an EMPTY store, independent of whatever was committed before.  (Writing
+\ genesis directly to both pages instead would exercise mt_boot's both-valid
+\ branch, which is not the tested path.)  For tests/benches that share one disk;
+\ a real node never formats. ──
+: eng_fmt
+	dup 4 lit + @ mt_z                                \ zero the wmeta buffer
+	dup eng_ds 0 lit 2 lit pick 4 lit + @ mt_wr       \ invalid -> page 0
+	dup eng_ds 1 lit 2 lit pick 4 lit + @ mt_wr       \ invalid -> page 1
+	dup eng_ds mt_flush
+;
 
 \ ── mt_boot ( eng -- )  load committed state: read both meta pages, take the
 \ valid one with the higher counter; on a fresh disk (neither valid) write

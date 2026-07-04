@@ -1,0 +1,668 @@
+\ ──────────────────────────────────────────────────────────────────────────────
+\ src/trie.fam — the COW trie: 32-byte key -> 32-byte value, built on the
+\ transactional page store in src/store.fam.
+\
+\ Compiled after src/fence.fam src/disk.fam src/store.fam.
+\
+\ NODE FORMATS (each is one 512-B page):
+\   internal node : 128 tagged child pointers, indexed by 7 key bits per level.
+\                   pointer: bit31 = leaf flag, bits0..30 = page# (0 = empty).
+\   leaf bucket   : count(4) then up to CAP entries of key(0x20)+value(0x20)
+\                   = 0x40 each.  CAP = (0x200-4)/0x40 = 7.
+\   trie_root (wmeta+8) is itself such a tagged pointer (0 = empty trie).
+\
+\ Keys are navigated MSB-first (byte 0 first), 7 bits per level via a 16-bit
+\ window so a 7-bit field straddling a byte boundary still reads correctly.
+\ A bucket splits only when it overflows; uniform (hash) keys keep it shallow.
+\
+\ Reads come in two flavors: tr_get is the BLOCKING descent (boot/tests); the
+\ lk_* fiber words are the NON-BLOCKING form for the event loop — a lookup
+\ advances as far as pool hits allow, issues at most one read, and yields.
+\ Writes are copy-on-write: each touched page on the descent path is copied
+\ to a fresh page and the root re-pointed, so the committed root stays valid
+\ until the meta flips.  tr_get/tr_put read the WORKING root (a txn sees its
+\ own writes); committed-snapshot readers are a later chunk.
+\
+\ Known gaps (deliberate, documented): a bucket split assumes the scattered
+\ entries don't immediately overflow a child (cascade splits deferred); two
+\ concurrent fibers reading the SAME page double-buffer it (wasteful, not
+\ incorrect — descent discipline should avoid it).
+\ ──────────────────────────────────────────────────────────────────────────────
+
+\ ── tag helpers for child pointers ──
+: is_leaf  80000000 lit and ;          \ ( ptr -- flag )  nonzero if leaf
+: pg_of    7FFFFFFF lit and ;          \ ( ptr -- page )  strip the tag
+: tg_leaf  80000000 lit or ;           \ ( page -- ptr )  tag as a leaf pointer
+
+\ ── kvcp8 ( src dst -- )  copy 32 bytes (8 words) — keys and values.  HOT:
+\ flat asm (word-aligned buffers).  Clobbers t0-t3/a0-a1. ──
+: kvcp8
+	03254100 ,   \ lw a0,4(sp)
+	83250100 ,   \ lw a1,0(sp)
+	13018100 ,   \ addi sp,sp,8
+	83220500 ,   \ lw t0,0(a0)
+	03234500 ,   \ lw t1,4(a0)
+	83238500 ,   \ lw t2,8(a0)
+	032EC500 ,   \ lw t3,12(a0)
+	23A05500 ,   \ sw t0,0(a1)
+	23A26500 ,   \ sw t1,4(a1)
+	23A47500 ,   \ sw t2,8(a1)
+	23A6C501 ,   \ sw t3,12(a1)
+	83220501 ,   \ lw t0,16(a0)
+	03234501 ,   \ lw t1,20(a0)
+	83238501 ,   \ lw t2,24(a0)
+	032EC501 ,   \ lw t3,28(a0)
+	23A85500 ,   \ sw t0,16(a1)
+	23AA6500 ,   \ sw t1,20(a1)
+	23AC7500 ,   \ sw t2,24(a1)
+	23AEC501 ,   \ sw t3,28(a1)
+;
+
+\ ── keq ( ka kb -- flag )  0xFFFFFFFF iff the two 32-byte keys are equal,
+\ else 0.  HOT: flat asm (OR of per-word XORs).  Clobbers t0-t2/a0-a2. ──
+: keq
+	03254100 ,   \ lw a0,4(sp)
+	83250100 ,   \ lw a1,0(sp)
+	13014100 ,   \ addi sp,sp,4
+	93030000 ,   \ li t2,0
+	83220500 ,   \ lw t0,0(a0)
+	03A30500 ,   \ lw t1,0(a1)
+	B3C26200 ,   \ xor t0,t0,t1
+	B3E35300 ,   \ or t2,t2,t0
+	83224500 ,   \ lw t0,4(a0)
+	03A34500 ,   \ lw t1,4(a1)
+	B3C26200 ,   \ xor t0,t0,t1
+	B3E35300 ,   \ or t2,t2,t0
+	83228500 ,   \ lw t0,8(a0)
+	03A38500 ,   \ lw t1,8(a1)
+	B3C26200 ,   \ xor t0,t0,t1
+	B3E35300 ,   \ or t2,t2,t0
+	8322C500 ,   \ lw t0,12(a0)
+	03A3C500 ,   \ lw t1,12(a1)
+	B3C26200 ,   \ xor t0,t0,t1
+	B3E35300 ,   \ or t2,t2,t0
+	83220501 ,   \ lw t0,16(a0)
+	03A30501 ,   \ lw t1,16(a1)
+	B3C26200 ,   \ xor t0,t0,t1
+	B3E35300 ,   \ or t2,t2,t0
+	83224501 ,   \ lw t0,20(a0)
+	03A34501 ,   \ lw t1,20(a1)
+	B3C26200 ,   \ xor t0,t0,t1
+	B3E35300 ,   \ or t2,t2,t0
+	83228501 ,   \ lw t0,24(a0)
+	03A38501 ,   \ lw t1,24(a1)
+	B3C26200 ,   \ xor t0,t0,t1
+	B3E35300 ,   \ or t2,t2,t0
+	8322C501 ,   \ lw t0,28(a0)
+	03A3C501 ,   \ lw t1,28(a1)
+	B3C26200 ,   \ xor t0,t0,t1
+	B3E35300 ,   \ or t2,t2,t0
+	13B61300 ,   \ seqz a2,t2
+	3306C040 ,   \ neg a2,a2
+	2320C100 ,   \ sw a2,0(sp)
+;
+
+\ ── tr_slot ( keyp level -- slot )  the 7 key bits at this level (0..127).
+\ HOT: division-free flat asm (byte/intra via shift+and).  Clobbers
+\ t0-t6/a0-a1. ──
+: tr_slot
+	03254100 ,   \ lw a0,4(sp)
+	83250100 ,   \ lw a1,0(sp)
+	13014100 ,   \ addi sp,sp,4
+	93923500 ,   \ slli t0,a1,0x3
+	B382B240 ,   \ sub t0,t0,a1
+	13D33200 ,   \ srli t1,t0,0x3
+	93F37200 ,   \ andi t2,t0,7
+	130E0000 ,   \ li t3,0
+	930E0002 ,   \ li t4,32
+	6376D301 ,   \ bgeu t1,t4,30
+	330F6500 ,   \ add t5,a0,t1
+	034E0F00 ,   \ lbu t3,0(t5)
+	930F0000 ,   \ li t6,0
+	130F1300 ,   \ addi t5,t1,1
+	6376DF01 ,   \ bgeu t5,t4,44
+	330FE501 ,   \ add t5,a0,t5
+	834F0F00 ,   \ lbu t6,0(t5)
+	131E8E00 ,   \ slli t3,t3,0x8
+	336EFE01 ,   \ or t3,t3,t6
+	130F9000 ,   \ li t5,9
+	330F7F40 ,   \ sub t5,t5,t2
+	335EEE01 ,   \ srl t3,t3,t5
+	137EFE07 ,   \ andi t3,t3,127
+	2320C101 ,   \ sw t3,0(sp)
+;
+
+\ ── bk_find ( bktp keyp -- valp|0 )  scan a leaf bucket for keyp; return the
+\ address of its 32-byte value, or 0 if absent.  count == 0 is guarded — a
+\ zero-trip `do` loop is NOT a no-op in this dialect. ──
+: bk_find
+	0 lit                              \ ( bktp keyp res )
+	2 lit pick @ dup 0 lit > if
+		0 lit do                       \ for i in 0..count-1
+			dup 0= if                  \ not found yet
+				2 lit pick 4 lit + i 40 lit * +   \ entry key = bktp+4+i*0x40
+				2 lit pick keq if
+					2 lit pick 4 lit + i 40 lit * + 20 lit +   \ its value
+					nip                \ res := value addr
+				then
+			then
+		loop
+	else drop then
+	nip nip
+;
+
+\ ── tr_get ( eng keyp valp -- found )  BLOCKING lookup: on a hit copy the
+\ 32-byte value into valp and return true, else false.  Each page is pinned
+\ for the step and unpinned before descending. ──
+: tr_get
+	2 lit pick wroot@                  \ ptr = working root  ( eng keyp valp ptr )
+	dup 0= if
+		2drop 2drop 0 lit              \ empty trie -> not found
+	else
+		0 lit swap                     \ level=0 ; ( eng keyp valp level ptr )
+		begin dup is_leaf 0= over 0 lit <> and while   \ internal + non-empty
+			4 lit pick @ over pg_of bp_get   \ ( ... ptr bp framep )
+			5 lit pick 4 lit pick tr_slot    \ slot = tr_slot(keyp, level)
+			over swap 4 lit * + @            \ child = framep[slot]
+			swap bp_unpin swap drop          \ unpin framep, drop bp ( ... ptr child )
+			nip                              \ drop old ptr
+			swap 1 lit + swap                \ level++
+		repeat
+		\ ptr is a leaf pointer, or 0 (empty slot).  ( eng keyp valp level ptr )
+		dup 0= if
+			drop 2drop 2drop 0 lit     \ empty leaf slot -> not found
+		else
+			pg_of 4 lit pick @ swap bp_get   \ ( ... level bp framep )
+			dup 5 lit pick bk_find           \ vp, keeping framep ( ... bp framep vp )
+			dup if
+				4 lit pick kvcp8       \ hit: copy the value into valp
+				FFFFFFFF lit
+			else
+				drop 0 lit
+			then
+			swap bp_unpin swap drop swap drop nip nip nip
+		then
+	then
+;
+
+\ ══════════════════════════════════════════════════════════════════════════════
+\ WRITE PATH (copy-on-write).  A pre-allocated TRIE CONTEXT `tc` carries the
+\ state a write needs so the data stack stays shallow.  tc is allocated ONCE
+\ by trie_ini and its pointer lives in the reserved eng+0x10 slot — no per-op
+\ alloc, no change to the store layer.
+\
+\ TRIE CONTEXT `tc` (0x154 bytes):
+\   tc+0x00 eng   tc+0x04 bp   tc+0x08 depth   tc+0x0C keyp   tc+0x10 valp
+\   tc+0x14 path[]  — per descended level: page(4) + slot(4) = 8 B (40 levels;
+\                     a 256-bit key is at most ceil(256/7) = 37 levels deep)
+\ ══════════════════════════════════════════════════════════════════════════════
+
+: bcap  7 lit ;                        \ leaf bucket capacity = (0x200-4)/0x40
+: eng_bp  @ ;                          \ ( eng -- bp )
+: eng_tc  10 lit + @ ;                 \ ( eng -- tc )
+
+\ ── trie_ini ( eng -- )  allocate the trie context once; stash eng + bp;
+\ publish tc in the reserved eng+0x10 slot.  Call after eng_init / mt_boot,
+\ before any tr_put. ──
+: trie_ini
+	154 lit alloc                      \ ( eng tc )
+	swap over !                        \ tc.eng = eng ; ( tc )
+	dup @ eng_bp over 4 lit + !        \ tc.bp = eng.bp
+	dup @ 10 lit + over swap !         \ eng+0x10 = tc
+	drop
+;
+
+\ ── bk_new ( eng keyp valp -- ptr )  fresh leaf bucket holding the single
+\ entry; returns its tagged leaf pointer ──
+: bk_new
+	2 lit pick pg_new                  \ ( eng keyp valp eng page )
+	swap @ over bp_alloc               \ ( eng keyp valp page bp framep )
+	1 lit over !                       \ count = 1
+	4 lit pick over 4 lit + kvcp8      \ key  -> framep+4
+	3 lit pick over 24 lit + kvcp8     \ val  -> framep+0x24
+	bp_unpin drop tg_leaf nip nip nip
+;
+
+\ ── bk_ins ( bktp keyp valp -- )  insert or update (keyp -> valp) in an
+\ in-RAM bucket.  Caller guarantees room (count < CAP) for a NEW key. ──
+: bk_ins
+	2 lit pick 2 lit pick bk_find      \ ( bktp keyp valp vp )
+	dup if
+		kvcp8 2drop                    \ update value in place
+	else
+		drop                           \ ( bktp keyp valp )
+		2 lit pick @                   \ count
+		3 lit pick 4 lit + over 40 lit * +   \ keydst = bktp+4+count*0x40
+		3 lit pick swap kvcp8
+		3 lit pick 4 lit + over 40 lit * + 20 lit +   \ valdst
+		2 lit pick swap kvcp8
+		1 lit + 3 lit pick !           \ count++
+		2drop drop
+	then
+;
+
+\ ── in_cow ( tc oldpage slot childptr -- newpage )  copy-on-write one
+\ internal node: fresh page, copy the 128 pointers, set slot -> childptr,
+\ return the new (untagged) page number. ──
+: in_cow
+	3 lit pick @ pg_new nip            \ newpage ( tc oldpage slot childptr newpage )
+	4 lit pick 4 lit + @ over bp_alloc \ ( ... newpage bp nf )
+	over 6 lit pick bp_get             \ of = bp_get(bp, oldpage) ( ... bp nf bp of )
+	dup 3 lit pick mt_cp               \ old node -> nf (asm copy)
+	bp_unpin drop                      \ unpin of, drop bp ( ... newpage bp nf )
+	dup 5 lit pick 4 lit * + 4 lit pick swap !   \ nf[slot] = childptr
+	bp_unpin drop                      \ unpin nf, drop bp
+	nip nip nip nip                    \ ( newpage )
+;
+
+\ ── bk_pch ( tc intframe slot keyp valp -- )  place (keyp,valp) into the
+\ child bucket at intframe[slot], creating it if empty (used by bk_split).
+\ Assumes the child won't overflow (cascade splits deferred). ──
+: bk_pch
+	3 lit pick 3 lit pick 4 lit * + @  \ cur = intframe[slot]
+	dup 0= if
+		drop                           \ empty slot ( tc intframe slot keyp valp )
+		4 lit pick @ 2 lit pick 2 lit pick bk_new   \ childptr
+		4 lit pick 4 lit pick 4 lit * + !           \ intframe[slot] = childptr
+		2drop 2drop drop
+	else
+		5 lit pick 4 lit + @ over pg_of bp_get      \ ( ... cur bp cf )
+		dup 5 lit pick 5 lit pick bk_ins            \ bk_ins(cf, keyp, valp)
+		bp_unpin                                    \ unpin cf
+		2drop 2drop 2drop drop
+	then
+;
+
+\ ── bk_split ( tc oldbktp -- intptr )  the full bucket plus the new entry
+\ (tc.keyp/tc.valp) overflowed: build an internal node at level tc.depth and
+\ scatter all CAP+1 entries into child buckets.  Returns the new (untagged)
+\ internal pointer. ──
+: bk_split
+	over @ pg_new nip                  \ intpage ( tc oldbktp intpage )
+	2 lit pick 4 lit + @ over bp_alloc \ ( tc oldbktp intpage bp intframe )
+	dup mt_z                           \ all 128 child slots empty
+	bcap 0 lit do
+		4 lit pick                     \ tc
+		1 lit pick                     \ intframe
+		5 lit pick 4 lit + i 40 lit * +          \ ekey (for slot)
+		2 lit pick 8 lit + @ tr_slot             \ slot = tr_slot(ekey, tc.depth)
+		6 lit pick 4 lit + i 40 lit * +          \ keyp = ekey
+		dup 20 lit +                             \ valp = ekey+0x20
+		bk_pch
+	loop
+	4 lit pick 1 lit pick              \ tc intframe (for the new entry)
+	1 lit pick dup C lit + @ swap 8 lit + @ tr_slot   \ slot = tr_slot(tc.keyp, tc.depth)
+	2 lit pick C lit + @               \ keyp = tc.keyp
+	3 lit pick 10 lit + @              \ valp = tc.valp
+	bk_pch
+	bp_unpin drop                      \ unpin intframe, drop bp
+	nip nip                            \ ( intpage )
+;
+
+\ ── tr_put ( eng keyp valp -- )  insert or update keyp -> valp, copy-on-
+\ write.  Mutates only the WORKING root (call inside a txn, then commit).
+\ Requires trie_ini to have run. ──
+: tr_put
+	\ stash keyp/valp/depth into the pre-allocated trie context
+	2 lit pick eng_tc                  \ ( eng keyp valp tc )
+	swap over 10 lit + !               \ tc.valp = valp ; ( eng keyp tc )
+	swap over C lit + !                \ tc.keyp = keyp ; ( eng tc )
+	0 lit over 8 lit + !               \ tc.depth = 0
+	nip                                \ ( tc )
+	\ phase 1: descend, recording the internal path
+	dup @ wroot@                       \ ptr = working root ( tc ptr )
+	begin dup is_leaf 0= over 0 lit <> and while
+		over 4 lit + @ over pg_of bp_get   \ ( tc ptr bp framep )
+		3 lit pick dup C lit + @ swap 8 lit + @ tr_slot   \ slot
+		over over 4 lit * + @              \ child = framep[slot]
+		5 lit pick dup 8 lit + @ 8 lit * + 14 lit +      \ pe = tc+0x14+depth*8
+		5 lit pick pg_of over !            \ pe.page = pg_of(ptr)
+		2 lit pick over 4 lit + !          \ pe.slot = slot
+		drop
+		nip                                \ drop slot ( tc ptr bp framep child )
+		swap bp_unpin swap drop            \ unpin framep, drop bp
+		nip                                \ drop old ptr ( tc child )
+		over 8 lit + dup @ 1 lit + swap !  \ tc.depth++
+	repeat
+	\ phase 2: build the new child at the target ( tc ptr )
+	dup 0= if
+		drop                               \ empty target
+		dup @ over C lit + @ 2 lit pick 10 lit + @ bk_new   \ ( tc newchild )
+	else
+		over 4 lit + @ over pg_of bp_get   \ oldbktp ( tc ptr bp oldbktp )
+		dup 4 lit pick C lit + @ bk_find   \ vp ( tc ptr bp oldbktp vp )
+		over @ bcap u< or                  \ exists OR count < CAP ?
+		if
+			3 lit pick @ pg_new nip        \ newpage ( tc ptr bp oldbktp newpage )
+			4 lit pick 4 lit + @ over bp_alloc   \ ( ... newpage bp nf )
+			3 lit pick over mt_cp          \ oldbktp -> nf (asm copy)
+			dup 7 lit pick C lit + @ 8 lit pick 10 lit + @ bk_ins
+			bp_unpin drop                  \ unpin nf, drop bp
+			tg_leaf                        \ newchild = leaf ptr
+		else
+			3 lit pick over bk_split       \ newchild = internal ptr
+		then
+		swap bp_unpin swap drop nip        \ unpin oldbktp, drop bp/ptr ( tc newchild )
+	then
+	\ phase 3: ascend, COWing each recorded internal node ( tc newchild )
+	over 8 lit + @
+	dup 0 lit > if
+		0 lit do
+			over 8 lit + @ 1 lit - i -     \ level = depth-1-i
+			8 lit * 14 lit + 2 lit pick +  \ pe = tc+0x14+level*8
+			2 lit pick                     \ tc
+			1 lit pick @                   \ page = pe.page
+			2 lit pick 4 lit + @           \ slot = pe.slot
+			4 lit pick                     \ childptr = current newchild
+			in_cow                         \ newpage ( tc newchild pe newpage )
+			nip nip                        \ ( tc newpage )
+		loop
+	else
+		drop
+	then
+	\ phase 4: install the new root
+	over @ swap wroot! drop
+;
+
+\ ══════════════════════════════════════════════════════════════════════════════
+\ ASYNC LOOKUP FIBERS — the non-blocking, resumable read path: a lookup yields
+\ to the event loop instead of spinning on a page-in.  The descent is a state
+\ machine over the pool's non-blocking primitives (bp_probe/bp_start/
+\ bp_ready): advance as far as pool hits allow; when a page must be read,
+\ issue the read and RETURN — resume on a later lk_step once the sector lands.
+\ Many independent fibers overlap (disk.fam's slot allocator handles the
+\ in-flight requests — fibers do NOT own disk slots); one descent is serial.
+\ Concurrency is bounded by pool pins: each active fiber pins at most one
+\ frame, so nframes caps the fiber count comfortably.
+\
+\ FIBER CONTEXT `lk` (0x20 bytes, caller-allocated):
+\   +0x00 keyp   +0x04 valp   +0x08 ptr (current tagged node)   +0x0C level
+\   +0x10 framep (pinned current frame)
+\   +0x14 phase (0 DESCEND, 1 WAIT, 2 PROCESS, 3 DONE)   +0x18 result (found?)
+\   +0x1C eng
+\ ══════════════════════════════════════════════════════════════════════════════
+
+: lk_bp  1C lit + @ @ ;                \ ( lk -- bp )   lk.eng.bp
+
+\ ── lk_start ( lk eng keyp valp -- )  arm a fiber on a key ──
+: lk_start
+	3 lit pick 4 lit + !               \ lk.valp = valp ; ( lk eng keyp )
+	2 lit pick !                       \ lk.keyp = keyp ; ( lk eng )
+	over 1C lit + !                    \ lk.eng = eng ; ( lk )
+	dup 1C lit + @ wroot@ over 8 lit + !   \ lk.ptr = working root
+	0 lit over C lit + !               \ level = 0
+	0 lit over 14 lit + !              \ phase = DESCEND
+	0 lit over 18 lit + !              \ result = 0
+	0 lit over 10 lit + !              \ framep = 0
+	drop
+;
+
+\ ── lk_desc ( lk -- lk )  DESCEND: acquire the page for the current ptr.
+\ Pool hit -> PROCESS now; miss -> issue the read (disk.fam assigns the slot)
+\ and go WAIT; ptr = 0 -> DONE (not found) ──
+: lk_desc
+	dup 8 lit + @ 0 lit = if
+		0 lit over 18 lit + !          \ result = not found
+		3 lit over 14 lit + !          \ phase = DONE
+	else
+		dup lk_bp over 8 lit + @ pg_of bp_probe   \ ( lk bp framep|0 )
+		dup if
+			2 lit pick 10 lit + !      \ lk.framep = framep ; ( lk bp )
+			drop
+			2 lit over 14 lit + !      \ phase = PROCESS
+		else
+			2drop                      \ ( lk )
+			dup lk_bp over 8 lit + @ pg_of bp_start   \ ( lk bp framep )
+			2 lit pick 10 lit + !      \ lk.framep = framep ; ( lk bp )
+			drop
+			1 lit over 14 lit + !      \ phase = WAIT
+		then
+	then
+;
+
+\ ── lk_wait ( lk -- lk )  WAIT: poll the in-flight read; done -> PROCESS ──
+: lk_wait
+	dup lk_bp over 10 lit + @ bp_ready \ ( lk bp framep done? )
+	if
+		2drop
+		2 lit over 14 lit + !          \ phase = PROCESS
+	else
+		2drop
+	then
+;
+
+\ ── lk_proc ( lk -- lk )  PROCESS: the current frame is valid.  Leaf -> scan
+\ bucket, copy value, DONE.  Internal -> read child, unpin, descend a level ──
+: lk_proc
+	dup 8 lit + @ is_leaf if
+		dup 10 lit + @ over @ bk_find  \ vp = bk_find(framep, keyp) ( lk vp )
+		dup if
+			over 4 lit + @ kvcp8       \ copy value into lk.valp
+			1 lit over 18 lit + !      \ result = found
+		else
+			drop  0 lit over 18 lit + !
+		then
+		dup 10 lit + @ bp_unpin        \ unpin frame
+		3 lit over 14 lit + !          \ phase = DONE
+	else
+		dup @ over C lit + @ tr_slot   \ slot = tr_slot(keyp, level)
+		over 10 lit + @ swap 4 lit * + @   \ child = framep[slot]
+		over 10 lit + @ bp_unpin       \ unpin frame
+		over 8 lit + !                 \ lk.ptr = child
+		dup C lit + dup @ 1 lit + swap !   \ level++
+		0 lit over 14 lit + !          \ phase = DESCEND
+	then
+;
+
+\ ── lk_step ( lk -- lk done? )  advance the fiber by ONE non-blocking
+\ transition; true once finished (result in lk.result, value in lk.valp) ──
+: lk_step
+	dup 14 lit + @ 0 lit = if lk_desc else
+	dup 14 lit + @ 1 lit = if lk_wait else
+	dup 14 lit + @ 2 lit = if lk_proc else
+	then then then
+	dup 14 lit + @ 3 lit =
+;
+
+\ ── lk_run ( lk -- )  BLOCKING drive of one fiber (boot/test path; the live
+\ node calls lk_step once per fiber per event-loop pass instead) ──
+: lk_run  begin lk_step until drop ;
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Tests.  Logic first (tags, slot math, key ops, bucket ops — no device), then
+\ trie_rt: the REAL-DEVICE round trip (puts through a bucket split, commit,
+\ reboot, gets, and a fiber lookup).  Self-skips via bfind without --disk.
+\ ──────────────────────────────────────────────────────────────────────────────
+Test {
+	\ pointer tagging: leaf bit set/stripped/detected.
+	tags_t {
+		5 lit tg_leaf is_leaf assert
+		5 lit tg_leaf pg_of 5 lit asrt_eq
+		5 lit is_leaf 0 lit asrt_eq
+	}
+	\ tr_slot: 7-bit windows, including one straddling a byte boundary.
+	slot_t {
+		20 lit alloc                        \ zeroed key
+		FE lit over c!                      \ key[0] = 0xFE
+		dup 0 lit tr_slot 7F lit asrt_eq    \ level 0: top 7 bits = 1111111
+		FF lit over 1 lit + c!              \ key[1] = 0xFF
+		dup 1 lit tr_slot 3F lit asrt_eq    \ level 1: b0 bit0 (0) + b1 top 6
+		5 lit tr_slot 0 lit asrt_eq         \ level 5 (bits 35..41): zeros
+	}
+	\ keq / kvcp8: equality and 32-byte copies.
+	key_t {
+		20 lit alloc 20 lit alloc           \ ( ka kb )  both zeroed
+		2dup keq assert                     \ equal
+		DEADBEEF lit 2 lit pick 1C lit + !  \ ka word7 = pattern
+		2dup keq 0 lit asrt_eq              \ differ now
+		2dup kvcp8                          \ ka -> kb
+		2dup keq assert                     \ equal again
+		1C lit + @ swap drop DEADBEEF lit asrt_eq   \ kb word7 copied
+	}
+	\ bk_find on an empty bucket is a guarded no-op (count = 0: the zero-trip
+	\ do-loop footgun) and bk_ins appends then updates in place.
+	bucket_t {
+		200 lit alloc dup mt_z              \ bucket, count = 0
+		20 lit alloc 11 lit over !          \ key A (word0 = 0x11)
+		20 lit alloc AA lit over !          \ val A (word0 = 0xAA)
+		2 lit pick 2 lit pick bk_find 0 lit asrt_eq   \ empty -> miss (guarded)
+		2 lit pick 2 lit pick 2 lit pick bk_ins       \ insert A
+		2 lit pick @ 1 lit asrt_eq          \ count 1
+		2 lit pick 2 lit pick bk_find       \ ( bkt ka va vp )
+		dup 0= 0= assert
+		@ AA lit asrt_eq                    \ value found
+		BB lit over !                       \ val A word0 = 0xBB
+		2 lit pick 2 lit pick 2 lit pick bk_ins       \ same key: update
+		2 lit pick @ 1 lit asrt_eq          \ count still 1
+		2drop                               \ ( bkt ) keep bucket
+		20 lit alloc 22 lit over !          \ key B
+		20 lit alloc CC lit over !          \ val B
+		2 lit pick 2 lit pick 2 lit pick bk_ins       \ insert B
+		2 lit pick @ 2 lit asrt_eq          \ count 2
+		2drop                               \ ( bkt )
+		20 lit alloc 11 lit over !          \ key A again
+		over swap bk_find @ BB lit asrt_eq  \ A's value is the update
+		drop
+	}
+	\ REAL DEVICE (self-skips without --disk): puts through a bucket split,
+	\ commit, reboot, gets — the whole trie on the whole store on the whole
+	\ disk stack.  12 keys share slot 0 at level 0 (byte0 = 0), so the root
+	\ bucket overflows at the 8th put and splits into an internal node.
+	trie_rt {
+		bfind ?dup if
+			48 lit alloc swap over !
+			D000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+			vblkinit
+			30 lit eng_init                \ 48-frame pool ( eng )
+			dup eng_fmt                 \ fresh trie (shared disk; store_rt committed first)
+			dup mt_boot
+			dup trie_ini
+			dup tx_begin
+			20 lit alloc 20 lit alloc 20 lit alloc   \ ( eng kb vb ob )
+			\ put 12 keys: key word0 = i<<8 (byte0 = 0 -> all in root slot 0;
+			\ byte1 = i -> distinct level-1 slots), val word0 = i*8+5
+			0 lit begin dup C lit u< while           \ ( eng kb vb ob i )
+				dup 1 lit lshift 4 lit pick !        \ kb word0 = 2i (distinct L0 slots)
+				dup 3 lit lshift 5 lit or 3 lit pick !   \ vb word0 = i*8+5
+				4 lit pick 4 lit pick 4 lit pick tr_put
+				1 lit +
+			repeat drop                              \ ( eng kb vb ob )
+			3 lit pick commit
+			\ committed root is INTERNAL (split happened) and non-zero
+			3 lit pick 8 lit + @ 8 lit + @ dup 0 lit <> assert
+			is_leaf 0 lit asrt_eq
+			\ get all 12 back through the working root
+			0 lit begin dup C lit u< while
+				dup 1 lit lshift 4 lit pick !        \ rebuild key i
+				4 lit pick 4 lit pick 3 lit pick tr_get assert   \ tr_get(eng, kb, ob)
+				over @ over 3 lit lshift 5 lit or asrt_eq   \ ob word0 = i*8+5
+				1 lit +
+			repeat drop
+			\ a missing key really misses
+			FFFF0000 lit 3 lit pick !                \ kb word0 = unseen key
+			3 lit pick 3 lit pick 2 lit pick tr_get 0 lit asrt_eq
+			\ reboot: second engine + trie on the same disk
+			3 lit pick eng_ds 30 lit eng_init        \ ( eng kb vb ob eng2 )
+			dup mt_boot
+			dup trie_ini
+			\ blocking get of key 9 via the rebooted engine
+			9 lit 1 lit lshift 4 lit pick !          \ kb = key 9
+			dup 4 lit pick 3 lit pick tr_get assert  \ found after reboot
+			over @ 4D lit asrt_eq                    \ 9*8+5 = 0x4D
+			\ fiber get of key 3: lk_start + lk_run (non-blocking machinery)
+			3 lit 1 lit lshift 4 lit pick !          \ kb = key 3
+			0 lit 2 lit pick !                       \ ob word0 cleared
+			20 lit alloc                             \ ( ... eng2 lk )
+			dup 2 lit pick 6 lit pick 5 lit pick lk_start   \ lk_start(lk, eng2, kb, ob)
+			dup lk_run                               \ drive the fiber to DONE
+			18 lit + @ 1 lit asrt_eq                 \ fiber found it (consumes lk)
+			1 lit pick @ 1D lit asrt_eq              \ ob word0 = 3*8+5 = 0x1D
+			drop drop drop drop drop
+		then
+	}
+}
+
+\ ──────────────────────────────────────────────────────────────────────────────
+\ Benches (scripts/bench.sh; device benches self-skip without --disk).
+\ tput = COW insert incl. amortized commit; tget = warm blocking lookup.
+\ ──────────────────────────────────────────────────────────────────────────────
+Bench {
+	\ per-PUT cost (commit EXCLUDED via bstop): 20 spread keys into a 48-frame
+	\ pool.  Each COW put creates fresh page versions and orphans the old ones,
+	\ so a txn's page count outgrows the pool and mid-txn eviction writes back
+	\ dirty pages (~35 us sync each) — that churn dominates, not the descent
+	\ CPU.  It's the honest cost of a large single txn on a small pool; real
+	\ block-apply either sizes the pool to the txn or commits more often.
+	tput {
+		bfind ?dup if
+			48 lit alloc swap over !
+			D000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+			vblkinit
+			30 lit eng_init dup eng_fmt dup mt_boot dup trie_ini   \ 48-frame pool
+			dup tx_begin
+			20 lit alloc 20 lit alloc      \ ( eng kb vb )
+			bgo
+			0 lit begin dup 14 lit u< while
+				dup 1 lit lshift 3 lit pick !    \ kb word0 = 2i (distinct L0 slots)
+				dup 2 lit pick !                 \ vb word0 = i
+				3 lit pick 3 lit pick 3 lit pick tr_put
+				1 lit +
+			repeat drop
+			bstop                          \ stop BEFORE commit
+			2 lit pick commit
+			drop drop drop
+			14 lit bops
+		else bskip then
+	}
+	\ one COMMIT of a ~20-key txn (bp_flush of the dirty COW pages, batched,
+	\ + two durability barriers + meta flip).  bops=1 -> ns/op = one commit.
+	tcommit {
+		bfind ?dup if
+			48 lit alloc swap over !
+			D000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+			vblkinit
+			30 lit eng_init dup eng_fmt dup mt_boot dup trie_ini
+			dup tx_begin
+			20 lit alloc 20 lit alloc
+			0 lit begin dup 14 lit u< while
+				dup 1 lit lshift 3 lit pick !
+				dup 2 lit pick !
+				3 lit pick 3 lit pick 3 lit pick tr_put
+				1 lit +
+			repeat drop
+			bgo
+			2 lit pick commit              \ time ONLY the commit
+			bstop
+			drop drop drop
+			1 lit bops
+		else bskip then
+	}
+	\ 1000 WARM lookups over 20 resident keys (working set < pool: every page
+	\ is a pool hit, so this measures the pure descent path, ~depth probes).
+	tget {
+		bfind ?dup if
+			48 lit alloc swap over !
+			D000 lit alloc FFF lit + FFFFF000 lit and dup qzero over 4 lit + !
+			vblkinit
+			30 lit eng_init dup eng_fmt dup mt_boot dup trie_ini
+			dup tx_begin
+			20 lit alloc 20 lit alloc
+			0 lit begin dup 14 lit u< while
+				dup 1 lit lshift 3 lit pick !
+				dup 2 lit pick !
+				3 lit pick 3 lit pick 3 lit pick tr_put
+				1 lit +
+			repeat drop
+			2 lit pick commit
+			bgo
+			0 lit begin dup 3E8 lit u< while
+				dup 14 lit % 1 lit lshift 3 lit pick !   \ key = 2*(i%20)
+				3 lit pick 3 lit pick 3 lit pick tr_get drop
+				1 lit +
+			repeat drop
+			bstop
+			drop drop drop
+			3E8 lit bops
+		else bskip then
+	}
+}
